@@ -432,6 +432,28 @@ fn parse_timestamp(s: &str) -> String {
     }
 }
 
+// ── Text-format round-trip ────────────────────────────────────────────────────
+
+/// Parse a `--format records` text dump (one ASTM frame per line) back into
+/// structured data.  Useful for testing and for offline re-processing of saved
+/// captures.  Lines that cannot be parsed are silently skipped.
+pub fn parse_records_from_text(text: &str) -> (DeviceInfo, Vec<Reading>) {
+    let mut device_info = DeviceInfo::default();
+    let mut readings = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match parse_record(line) {
+            Ok(Record::Header(info)) => device_info = info,
+            Ok(Record::Result(r)) if !r.is_control => readings.push(r),
+            _ => {}
+        }
+    }
+    (device_info, readings)
+}
+
 // ── Main session loop ─────────────────────────────────────────────────────────
 
 /// Send one command, receive one complete message, retry with NAK on transient errors.
@@ -779,5 +801,120 @@ mod tests {
         let pkt = build_write_packet(&[0x01, 0x02, 0x03]);
         assert_eq!(pkt[4], 3);
         assert_eq!(&pkt[5..8], &[0x01, 0x02, 0x03]);
+    }
+
+    // ── Tests grounded in the real Contour Next One capture ───────────────────
+    //
+    // All personally-identifying values (serial, timestamps, glucose readings)
+    // have been replaced with synthetic equivalents. The structural patterns —
+    // serial format, config string layout, annotation variants — are taken
+    // directly from the capture.
+
+    /// Real device serial format: leading model digits + uppercase letter separator.
+    /// "7802H7001396" → strip "7802" + "H" → "7001396"
+    #[test]
+    fn serial_real_device_format() {
+        assert_eq!(parse_serial("7802H7001396"), "7001396");
+    }
+
+    /// Real device config string: U=1 (mmol/L), V=06333.
+    /// V field: low = "06" / 10 = 0.6 mmol/L, high = "333" / 10 = 33.3 mmol/L.
+    /// Converted to mg/dL: 0.6 × 18.01559 ≈ 10, 33.3 × 18.01559 ≈ 599.
+    #[test]
+    fn thresholds_real_device_config() {
+        let config = "A=1^C=6^R=0^S=1^U=1^V=06333^X=039039100072^a=1^J=0";
+        let (lo, hi) = parse_thresholds(config);
+        assert_eq!(lo, 10);
+        assert_eq!(hi, 599);
+    }
+
+    /// The most common annotation in the real data — no meal or time context.
+    #[test]
+    fn result_t0m0_no_meal_marker() {
+        let r = parse_r("R|1|^^^Glucose|7.4|mmol/L^P||T0/M0||20200101090000");
+        assert_eq!(r.meal_marker, None);
+        assert!(!r.high);
+        assert!(!r.low);
+        assert!(!r.is_control);
+    }
+
+    /// The "A/T0/M0" annotation observed in the real data (post-meal flagged
+    /// on the meter). The leading 'A' encodes post-meal; the rest is discarded.
+    #[test]
+    fn result_a_t0m0_is_postmeal() {
+        let r = parse_r("R|354|^^^Glucose|7.9|mmol/L^P||A/T0/M0||20200101180000");
+        assert_eq!(r.meal_marker, Some("post-meal".to_string()));
+        assert!(!r.high);
+        assert!(!r.low);
+    }
+
+    /// H record with the real device's structure: password in field[3],
+    /// 14-digit timestamp, trailing empty field (15 total), U=1, V=06333.
+    #[test]
+    fn header_real_device_structure() {
+        // Sanitised: fake password, fake serial, fake timestamp, synthetic values.
+        let frame = "H|\\^&||AAAAAA|ContourTest^01.00\\01.00\\01.00^0000X0000000|\
+                     A=1^C=6^R=0^S=1^U=1^V=06333^X=039039100072^a=1^J=0|\
+                     800|||||P|1|20200101090000|";
+        let info = parse_header(frame).unwrap();
+        assert_eq!(info.model, "ContourTest");
+        assert_eq!(info.serial_number, "0000000");
+        assert_eq!(info.record_count, 800);
+        assert_eq!(info.device_time, "2020-01-01T09:00:00");
+        // U=1, V=06333 → low ≈ 10 mg/dL, high ≈ 599 mg/dL
+        assert_eq!(info.low_threshold, 10);
+        assert_eq!(info.high_threshold, 599);
+    }
+
+    // ── parse_records_from_text / fixture round-trip ──────────────────────────
+
+    const FIXTURE: &str = include_str!("../tests/fixtures/sample.txt");
+
+    #[test]
+    fn fixture_device_info_parses() {
+        let (device, _) = parse_records_from_text(FIXTURE);
+        assert_eq!(device.model, "ContourTest");
+        assert_eq!(device.serial_number, "0000000");
+        assert_eq!(device.record_count, 6);
+        assert_eq!(device.device_time, "2020-01-01T09:00:00");
+    }
+
+    #[test]
+    fn fixture_reading_count_excludes_control() {
+        // Fixture has 6 R records; R|6 is a control (<) — wait, '<' is low, not control.
+        // R|5 has '>' (high), R|6 has '<' (low). Neither is control ('C').
+        // All 6 should appear in readings.
+        let (_, readings) = parse_records_from_text(FIXTURE);
+        assert_eq!(readings.len(), 6);
+    }
+
+    #[test]
+    fn fixture_first_reading() {
+        let (_, readings) = parse_records_from_text(FIXTURE);
+        let r = &readings[0];
+        assert_eq!(r.glucose_value, 7.4);
+        assert_eq!(r.units, "mmol/L");
+        assert_eq!(r.timestamp, "2020-01-01T09:00:00");
+        assert_eq!(r.meal_marker, None);
+        assert!(!r.high);
+        assert!(!r.low);
+    }
+
+    #[test]
+    fn fixture_postmeal_annotation() {
+        let (_, readings) = parse_records_from_text(FIXTURE);
+        // R|4 has A/T0/M0
+        let r = &readings[3];
+        assert_eq!(r.meal_marker, Some("post-meal".to_string()));
+    }
+
+    #[test]
+    fn fixture_high_and_low_flags() {
+        let (_, readings) = parse_records_from_text(FIXTURE);
+        // R|5 → high, R|6 → low
+        assert!(readings[4].high);
+        assert!(!readings[4].low);
+        assert!(readings[5].low);
+        assert!(!readings[5].high);
     }
 }

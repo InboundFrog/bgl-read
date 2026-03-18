@@ -55,3 +55,31 @@ bgl-read --list
 
 Timestamps are in the meter's own local time (no timezone attached — the device
 has no concept of timezone).
+
+---
+
+## Supported devices
+
+All Contour Next devices share USB vendor ID `0x1A79` (Ascensia / Bayer).
+
+| Product ID | Device |
+|------------|--------|
+| `0x7800` | Contour Next One (USB-only variant) |
+| `0x7440` | Contour Next USB |
+| `0x7350` | Contour Next |
+| `0x7900` | Ascensia Contour Next |
+| `0x6220` | Contour Next Link |
+| `0x6230` | Contour Next Link 2.4 |
+
+The tool opens the first matching device it finds. Run `--list` to see what is
+connected.
+
+---
+
+## Notes
+
+- The meter stores the **800 most recent readings** in a circular buffer —
+  older readings are silently overwritten. Read regularly if you need a
+  complete history.
+- **Control solution** readings (used to verify the meter) are detected via the
+  annotation field and excluded from output.

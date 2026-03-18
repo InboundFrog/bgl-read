@@ -215,3 +215,39 @@ name:
 | `Contour7390` | Contour USB |
 
 The prefix may be `Bayer` instead of `Contour` on older firmware.
+
+---
+
+## V= threshold field — units detail
+
+The `V` value encodes thresholds in the device's *native display units*:
+
+- **mg/dL meters (`U=0`):** values are direct integers.
+  `V=20600` → low = 20 mg/dL, high = 600 mg/dL.
+- **mmol/L meters (`U=1`):** values are tenths of mmol/L.
+  `V=06333` → low = 0.6 mmol/L, high = 33.3 mmol/L.
+
+These are the full measurable range of the device, not user-configurable alert
+thresholds. Readings that exceed the range are flagged `>` or `<` in the
+marker field.
+
+---
+
+## Observed behaviour — Contour Next One (PID `0x7800`, firmware `02.03`)
+
+Verified from USB capture (2026-03-18):
+
+- Units: **mmol/L** (`U=1`)
+- Threshold config: `V=06333` (0.6–33.3 mmol/L — effectively the full range)
+- All frames terminated with **ETB** (`0x17`), never ETX
+- **H record spans 3 HID packets** (~143 bytes total); all P and R records fit
+  in a single packet
+- Serial string format: `7802H7001396` → strip `7802` + `H` → serial `7001396`
+- Marker field is almost always `T0/M0` (no context); `A/T0/M0` (post-meal)
+  observed occasionally
+- No `>` or `<` flags seen in 800 readings — consistent with the wide
+  threshold range
+- The H record timestamp is **14 digits** (`YYYYMMDDHHmmss`); R record
+  timestamps are also 14 digits for this firmware
+- H record has a **trailing empty field** (15 fields, not 14): the last `|`
+  produces an empty 15th element that can be ignored
