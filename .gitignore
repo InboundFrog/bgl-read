@@ -1,0 +1,8 @@
+# Cargo related
+/target
+
+# Local Data Capture
+/captures/
+
+# Claude local only configs
+.claude/*.local.*
