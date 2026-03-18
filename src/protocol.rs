@@ -283,6 +283,7 @@ fn decode_message(buf: &[u8]) -> Result<Message> {
 
 // ── Record parsing ────────────────────────────────────────────────────────────
 
+#[derive(Debug)]
 enum Record {
     Header(DeviceInfo),
     Result(Reading),
@@ -543,4 +544,240 @@ pub fn fetch_all(device: &HidDevice, progress: bool) -> Result<Session> {
     );
 
     Ok(Session { device: device_info, readings, raw_records, raw_packets: packets })
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Checksum ──────────────────────────────────────────────────────────────
+
+    /// Verified against the example in the original Tidepool JS driver comments:
+    ///   <STX>5R|3|^^^Glucose|93|mg/dL^P||A/M0/T1||201505261150<CR><ETB>74<CR><LF>
+    /// Checksum covers seq digit '5' through ETB (inclusive) → sum mod 256 = 0x74.
+    #[test]
+    fn checksum_known_r_record() {
+        let input = b"5R|3|^^^Glucose|93|mg/dL^P||A/M0/T1||201505261150\r\x17";
+        assert_eq!(compute_checksum(input), "74");
+    }
+
+    #[test]
+    fn checksum_single_byte() {
+        // sum of one byte is that byte; 0x06 % 256 = 6 → "06"
+        assert_eq!(compute_checksum(&[0x06]), "06");
+    }
+
+    #[test]
+    fn checksum_overflow_wraps() {
+        // 255 + 2 = 257 % 256 = 1 → "01"
+        assert_eq!(compute_checksum(&[0xFF, 0x02]), "01");
+    }
+
+    // ── decode_message ────────────────────────────────────────────────────────
+
+    fn r_record_frame() -> Vec<u8> {
+        // Full raw buffer for: <STX>5R|3|^^^Glucose|93|mg/dL^P||A/M0/T1||201505261150<CR><ETB>74<CR><LF>
+        let mut v = vec![STX, b'5'];
+        v.extend_from_slice(b"R|3|^^^Glucose|93|mg/dL^P||A/M0/T1||201505261150");
+        v.extend_from_slice(&[CR, ETB, b'7', b'4', CR, b'\n']);
+        v
+    }
+
+    #[test]
+    fn decode_stx_frame_extracts_content() {
+        let msg = decode_message(&r_record_frame()).unwrap();
+        assert_eq!(msg.msg_type, STX);
+        assert_eq!(msg.frame, "R|3|^^^Glucose|93|mg/dL^P||A/M0/T1||201505261150");
+    }
+
+    #[test]
+    fn decode_single_enq() {
+        let msg = decode_message(&[ENQ]).unwrap();
+        assert_eq!(msg.msg_type, ENQ);
+        assert!(msg.frame.is_empty());
+    }
+
+    #[test]
+    fn decode_single_eot() {
+        let msg = decode_message(&[EOT]).unwrap();
+        assert_eq!(msg.msg_type, EOT);
+    }
+
+    #[test]
+    fn decode_empty_returns_error() {
+        assert!(decode_message(&[]).is_err());
+    }
+
+    // ── parse_timestamp ───────────────────────────────────────────────────────
+
+    #[test]
+    fn timestamp_12_digit() {
+        assert_eq!(parse_timestamp("201505261150"), "2015-05-26T11:50:00");
+    }
+
+    #[test]
+    fn timestamp_14_digit() {
+        assert_eq!(parse_timestamp("20150529124800"), "2015-05-29T12:48:00");
+    }
+
+    #[test]
+    fn timestamp_ignores_trailing_garbage() {
+        // ETB or other trailing bytes sometimes leak through; only digits are taken
+        assert_eq!(parse_timestamp("201505261150\r\x17"), "2015-05-26T11:50:00");
+    }
+
+    // ── parse_serial ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn serial_letter_separator() {
+        // "7830H5001733" → skip "7830", skip "H", get "5001733"
+        assert_eq!(parse_serial("7830H5001733"), "5001733");
+    }
+
+    #[test]
+    fn serial_dash_separator() {
+        // "7358-1611135" → skip "7358", skip "-", get "1611135"
+        assert_eq!(parse_serial("7358-1611135"), "1611135");
+    }
+
+    // ── parse_thresholds ──────────────────────────────────────────────────────
+
+    #[test]
+    fn thresholds_mg_dl() {
+        let (lo, hi) = parse_thresholds("A=1^U=0^V=20600");
+        assert_eq!(lo, 20);
+        assert_eq!(hi, 600);
+    }
+
+    #[test]
+    fn thresholds_mmol_converts_to_mg_dl() {
+        // U=1 means mmol/L; V=02033 → lo=2 mmol/L×10=2, hi=033 mmol/L×10=3.3
+        // 2/10 * 18.01559 ≈ 3,  3.3/10 * 18.01559 ≈ 59
+        let (lo, hi) = parse_thresholds("U=1^V=02033");
+        assert_eq!(lo, 3);
+        assert_eq!(hi, 59);
+    }
+
+    // ── parse_meal_marker ─────────────────────────────────────────────────────
+
+    #[test]
+    fn meal_marker_pre() {
+        assert_eq!(parse_meal_marker("B/M0/T1"), Some("pre-meal".to_string()));
+    }
+
+    #[test]
+    fn meal_marker_post() {
+        assert_eq!(parse_meal_marker("A/M0/T1"), Some("post-meal".to_string()));
+    }
+
+    #[test]
+    fn meal_marker_logbook() {
+        assert_eq!(parse_meal_marker("D/M0/T1"), Some("logbook".to_string()));
+    }
+
+    #[test]
+    fn meal_marker_none_for_out_of_range() {
+        assert_eq!(parse_meal_marker(">"), None);
+        assert_eq!(parse_meal_marker("<"), None);
+    }
+
+    #[test]
+    fn meal_marker_none_for_empty() {
+        assert_eq!(parse_meal_marker(""), None);
+    }
+
+    // ── parse_result_record ───────────────────────────────────────────────────
+
+    fn parse_r(frame: &str) -> Reading {
+        match parse_result_record(frame).unwrap() {
+            Record::Result(r) => r,
+            other => panic!("expected Record::Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn result_normal_mg_dl() {
+        let r = parse_r("R|3|^^^Glucose|93|mg/dL^P||A/M0/T1||201505261150");
+        assert_eq!(r.record_number, 3);
+        assert_eq!(r.glucose_value, 93.0);
+        assert_eq!(r.units, "mg/dL");
+        assert_eq!(r.timestamp, "2015-05-26T11:50:00");
+        assert!(!r.high);
+        assert!(!r.low);
+        assert!(!r.is_control);
+        assert_eq!(r.meal_marker, Some("post-meal".to_string()));
+    }
+
+    #[test]
+    fn result_mmol_l() {
+        let r = parse_r("R|1|^^^Glucose|5.4|mmol/L^P||B/M0/T1||202411030845");
+        assert_eq!(r.glucose_value, 5.4);
+        assert_eq!(r.units, "mmol/L");
+        assert_eq!(r.meal_marker, Some("pre-meal".to_string()));
+    }
+
+    #[test]
+    fn result_high() {
+        let r = parse_r("R|5|^^^Glucose|601|mg/dL^P||>||201505261200");
+        assert!(r.high);
+        assert!(!r.low);
+        assert!(!r.is_control);
+    }
+
+    #[test]
+    fn result_low() {
+        let r = parse_r("R|6|^^^Glucose|19|mg/dL^P||<||201505261210");
+        assert!(!r.high);
+        assert!(r.low);
+    }
+
+    #[test]
+    fn result_control_flagged() {
+        let r = parse_r("R|7|^^^Glucose|100|mg/dL^P||C||201505261220");
+        assert!(r.is_control);
+    }
+
+    // ── parse_header ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn header_parses_correctly() {
+        // Minimal but valid H record with 14 pipe-delimited fields
+        let frame = "H|\\^&|||Bayer7350^fw^7358-1611135|A=1^U=0^V=20600|4|||||P|1|201505291248";
+        let info = parse_header(frame).unwrap();
+        assert_eq!(info.model, "Bayer7350");
+        assert_eq!(info.serial_number, "1611135");
+        assert_eq!(info.record_count, 4);
+        assert_eq!(info.device_time, "2015-05-29T12:48:00");
+        assert_eq!(info.low_threshold, 20);
+        assert_eq!(info.high_threshold, 600);
+    }
+
+    #[test]
+    fn header_too_few_fields_is_error() {
+        assert!(parse_header("H|\\^&||short").is_err());
+    }
+
+    // ── build_write_packet ────────────────────────────────────────────────────
+
+    #[test]
+    fn write_packet_structure() {
+        let pkt = build_write_packet(&[ACK]);
+        assert_eq!(pkt.len(), 65);
+        assert_eq!(pkt[0], 0x00); // report ID
+        assert_eq!(pkt[1], 0x00); // header byte 0
+        assert_eq!(pkt[2], 0x00); // header byte 1
+        assert_eq!(pkt[3], 0x00); // header byte 2
+        assert_eq!(pkt[4], 0x01); // payload length
+        assert_eq!(pkt[5], ACK);  // payload
+        assert!(pkt[6..].iter().all(|&b| b == 0)); // zero-padded
+    }
+
+    #[test]
+    fn write_packet_multi_byte_payload() {
+        let pkt = build_write_packet(&[0x01, 0x02, 0x03]);
+        assert_eq!(pkt[4], 3);
+        assert_eq!(&pkt[5..8], &[0x01, 0x02, 0x03]);
+    }
 }
