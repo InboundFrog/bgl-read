@@ -1,5 +1,17 @@
 # bgl-read
 
+## Note
+
+This is based on the [Sensotrend/sensotrend-uploader](https://github.com/Sensotrend/sensotrend-uploader/).
+
+I just needed to be able to read data from a Contour Next One (older USB model)
+to grab the BGL data for someone else.
+
+[Claude](https://claude.com/product/claude-code) did all the hard yards
+figuring out how to convert the small portion I needed into Rust.
+
+## Overview
+
 Reads blood glucose readings from a Bayer/Ascensia Contour Next USB meter and
 outputs them as JSON or CSV.
 
