@@ -442,11 +442,7 @@ fn parse_timestamp(s: &str) -> String {
 pub fn parse_records_from_text(text: &str) -> (DeviceInfo, Vec<Reading>) {
     let mut device_info = DeviceInfo::default();
     let mut readings = Vec::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
         match parse_record(line) {
             Ok(Record::Header(info)) => device_info = info,
             Ok(Record::Result(r)) if !r.is_control => readings.push(r),
