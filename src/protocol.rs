@@ -438,9 +438,9 @@ fn parse_timestamp(s: &str) -> String {
 // ── Text-format round-trip ────────────────────────────────────────────────────
 
 /// Parse a `--format records` text dump (one ASTM frame per line) back into
-/// structured data.  Useful for testing and for offline re-processing of saved
-/// captures.  Lines that cannot be parsed are silently skipped.
-pub fn parse_records_from_text(text: &str) -> (DeviceInfo, Vec<Reading>) {
+/// structured data.  Lines that cannot be parsed are silently skipped.
+#[cfg(test)]
+fn parse_records_from_text(text: &str) -> (DeviceInfo, Vec<Reading>) {
     let mut device_info = DeviceInfo::default();
     let mut readings = Vec::new();
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
