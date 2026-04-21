@@ -346,7 +346,7 @@ fn parse_serial(raw: &str) -> String {
 fn parse_thresholds(config: &str) -> (u32, u32) {
     let mut low = 20u32;
     let mut high = 600u32;
-    let mut units = 0u32;
+    let mut mmol = false;
 
     for part in config.split('^') {
         if let Some(val) = part.strip_prefix("V=") {
@@ -356,11 +356,11 @@ fn parse_thresholds(config: &str) -> (u32, u32) {
                 high = val[2..5].parse().unwrap_or(600);
             }
         } else if let Some(val) = part.strip_prefix("U=") {
-            units = val.trim().parse().unwrap_or(0);
+            mmol = val.trim() == "1";
         }
     }
 
-    if units == 1 {
+    if mmol {
         // Values were in mmol/L × 10; convert to mg/dL
         low = ((low as f64 / 10.0) * 18.01559) as u32;
         high = ((high as f64 / 10.0) * 18.01559) as u32;
