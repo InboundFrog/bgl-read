@@ -1,4 +1,4 @@
-use crate::protocol::{Dir, Session};
+use crate::protocol::Session;
 use crate::Format;
 use anyhow::Result;
 use std::io::{self, BufWriter, Write};
@@ -77,11 +77,7 @@ fn write_records<W: Write>(session: &Session, w: &mut W) -> Result<()> {
 
 fn write_bytes<W: Write>(session: &Session, w: &mut W) -> Result<()> {
     for (i, pkt) in session.raw_packets.iter().enumerate() {
-        let dir = match pkt.dir {
-            Dir::Tx => "TX",
-            Dir::Rx => "RX",
-        };
-        writeln!(w, "--- packet {i:04} {dir} ---")?;
+        writeln!(w, "--- packet {i:04} {} ---", pkt.dir)?;
         hex_dump(&pkt.data, w)?;
     }
     Ok(())

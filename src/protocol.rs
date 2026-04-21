@@ -20,6 +20,7 @@
 use anyhow::{anyhow, Result};
 use hidapi::{HidApi, HidDevice};
 use serde::Serialize;
+use std::fmt;
 use std::time::{Duration, Instant};
 
 // ── Device IDs ────────────────────────────────────────────────────────────────
@@ -100,6 +101,12 @@ pub struct Reading {
 pub enum Dir {
     Tx,
     Rx,
+}
+
+impl fmt::Display for Dir {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self { Dir::Tx => "TX", Dir::Rx => "RX" })
+    }
 }
 
 /// One captured HID packet (raw 64 bytes + direction).
