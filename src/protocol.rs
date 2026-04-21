@@ -334,12 +334,11 @@ fn parse_header(frame: &str) -> Result<DeviceInfo> {
 /// Matches JS regex /^\d+[\w-]\s*(\w+)/ — skip leading digits + one separator char.
 fn parse_serial(raw: &str) -> String {
     let after_digits = raw.trim_start_matches(|c: char| c.is_ascii_digit());
-    if after_digits.is_empty() {
-        return raw.to_string();
-    }
     // Skip exactly one separator character
-    let after_sep = &after_digits[after_digits.char_indices().next().map(|(_, c)| c.len_utf8()).unwrap_or(0)..];
-    after_sep.trim_start().to_string()
+    match after_digits.chars().next() {
+        Some(sep) => after_digits[sep.len_utf8()..].trim_start().to_string(),
+        None => raw.to_string(),
+    }
 }
 
 /// Parse the config field (field[5]) for thresholds and units.
