@@ -482,9 +482,8 @@ fn get_one_record(device: &HidDevice, log: &mut Vec<Packet>) -> Result<(Record, 
             EOT => return Ok((Record::EndOfTransmission, String::new())),
             ACK => continue,
             STX => {
-                let raw = msg.frame.clone();
                 let record = parse_record(&msg.frame)?;
-                return Ok((record, raw));
+                return Ok((record, msg.frame));
             }
             other => {
                 retries += 1;
