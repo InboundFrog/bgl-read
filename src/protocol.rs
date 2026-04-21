@@ -276,13 +276,9 @@ fn decode_message(buf: &[u8]) -> Result<Message> {
 
     // Frame content is buf[2..len-4] — includes the trailing CR+ETX/ETB.
     // Strip them so callers just see the record text.
-    let mut content = &buf[2..buf.len() - 4];
-    if content.last() == Some(&ETX) || content.last() == Some(&ETB) {
-        content = &content[..content.len() - 1];
-    }
-    if content.last() == Some(&CR) {
-        content = &content[..content.len() - 1];
-    }
+    let content = &buf[2..buf.len() - 4];
+    let content = match content { [rest @ .., ETX | ETB] => rest, _ => content };
+    let content = match content { [rest @ .., CR] => rest, _ => content };
 
     let frame = String::from_utf8_lossy(content).into_owned();
     Ok(Message { msg_type, frame })
