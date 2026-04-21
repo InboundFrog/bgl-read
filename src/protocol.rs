@@ -21,6 +21,7 @@ use anyhow::{anyhow, Result};
 use hidapi::{HidApi, HidDevice};
 use serde::Serialize;
 use std::fmt;
+use std::io::Write as _;
 use std::time::{Duration, Instant};
 
 // ── Device IDs ────────────────────────────────────────────────────────────────
@@ -506,13 +507,13 @@ pub fn fetch_all(device: &HidDevice, progress: bool) -> Result<Session> {
     loop {
         let (record, raw) = get_one_record(device, &mut packets)?;
 
+        if !raw.is_empty() {
+            raw_records.push(raw);
+        }
+
         match record {
-            Record::Header(info) => {
-                if !raw.is_empty() { raw_records.push(raw); }
-                device_info = info;
-            }
+            Record::Header(info) => device_info = info,
             Record::Result(r) => {
-                if !raw.is_empty() { raw_records.push(raw.clone()); }
                 if r.is_control {
                     if progress {
                         eprint!("\r{:80}\r", ""); // clear line
@@ -531,18 +532,13 @@ pub fn fetch_all(device: &HidDevice, progress: bool) -> Result<Session> {
                             if r.high { "HIGH " } else if r.low { "LOW  " } else { "     " },
                             r.meal_marker.as_deref().unwrap_or(""),
                         );
-                        // Flush stderr — it's often line-buffered
-                        use std::io::Write;
                         let _ = std::io::stderr().flush();
                     }
                     readings.push(r);
                 }
             }
-            Record::Patient => {
-                if !raw.is_empty() { raw_records.push(raw); }
-            }
+            Record::Patient => {}
             Record::Terminator => {
-                if !raw.is_empty() { raw_records.push(raw); }
                 // Send final ACK and wait for EOT
                 let _ = get_one_record(device, &mut packets);
                 break;
