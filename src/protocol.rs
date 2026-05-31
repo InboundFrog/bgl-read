@@ -53,7 +53,11 @@ const CR: u8 = 0x0D;
 const HID_PACKET_SIZE: usize = 64;
 // Maximum data bytes per HID packet = 64 total - 4 overhead (3 header + 1 length byte)
 const MAX_PAYLOAD: usize = HID_PACKET_SIZE - 4;
-const MAX_RETRIES: u32 = 6;
+/// Transient I/O retries (receive_message returned Err).
+const IO_RETRIES: u32 = 6;
+/// Protocol-violation retries (unexpected message type or parse failure).
+const PROTO_RETRIES: u32 = 6;
+const RECEIVE_TIMEOUT: Duration = Duration::from_secs(10);
 
 // ── Public data types ─────────────────────────────────────────────────────────
 
@@ -465,14 +469,14 @@ fn get_one_record(device: &HidDevice, log: &mut Vec<Packet>) -> Result<(Record, 
         hid_write(device, &[cmd], log)?;
         cmd = ACK;
 
-        let msg = match receive_message(device, Duration::from_secs(10), log) {
+        let msg = match receive_message(device, RECEIVE_TIMEOUT, log) {
             Ok(m) => m,
             Err(e) => {
                 retries += 1;
-                if retries >= MAX_RETRIES {
+                if retries >= IO_RETRIES {
                     return Err(e);
                 }
-                eprintln!("Receive error ({retries}/{MAX_RETRIES}): {e}");
+                eprintln!("Receive error ({retries}/{IO_RETRIES}): {e}");
                 cmd = NAK;
                 continue;
             }
@@ -487,17 +491,17 @@ fn get_one_record(device: &HidDevice, log: &mut Vec<Packet>) -> Result<(Record, 
                 Ok(record) => return Ok((record, msg.frame)),
                 Err(e) => {
                     retries += 1;
-                    if retries >= MAX_RETRIES {
+                    if retries >= PROTO_RETRIES {
                         return Err(e);
                     }
-                    eprintln!("Parse error ({retries}/{MAX_RETRIES}): {e}");
+                    eprintln!("Parse error ({retries}/{PROTO_RETRIES}): {e}");
                     cmd = NAK;
                 }
             },
             other => {
                 retries += 1;
-                if retries >= MAX_RETRIES {
-                    return Err(anyhow!("Unexpected message byte {other:#04x} after {MAX_RETRIES} retries"));
+                if retries >= PROTO_RETRIES {
+                    return Err(anyhow!("Unexpected message byte {other:#04x} after {PROTO_RETRIES} retries"));
                 }
                 cmd = NAK;
             }
