@@ -17,7 +17,7 @@
 //!   STX  seq_digit  record_text  CR  ETX|ETB  CS1  CS2  CR  LF
 //! Checksum covers: seq_digit through ETX/ETB (inclusive), sum of bytes mod 256, uppercase hex.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use hidapi::{HidApi, HidDevice};
 use serde::Serialize;
 use std::fmt;
@@ -110,7 +110,10 @@ pub enum Dir {
 
 impl fmt::Display for Dir {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self { Dir::Tx => "TX", Dir::Rx => "RX" })
+        f.write_str(match self {
+            Dir::Tx => "TX",
+            Dir::Rx => "RX",
+        })
     }
 }
 
@@ -176,7 +179,12 @@ pub fn open_device(api: &HidApi) -> Result<HidDevice> {
 
 /// Build a 65-byte write buffer (report-ID + 64 payload bytes).
 fn build_write_packet(data: &[u8]) -> [u8; 65] {
-    debug_assert!(data.len() <= MAX_PAYLOAD, "write payload {} exceeds MAX_PAYLOAD {}", data.len(), MAX_PAYLOAD);
+    debug_assert!(
+        data.len() <= MAX_PAYLOAD,
+        "write payload {} exceeds MAX_PAYLOAD {}",
+        data.len(),
+        MAX_PAYLOAD
+    );
     // Layout: [report_id=0, hdr0=0, hdr1=0, hdr2=0, length, data..., padding]
     let mut pkt = [0u8; 65];
     pkt[4] = data.len() as u8;
@@ -188,13 +196,20 @@ fn hid_write(device: &HidDevice, data: &[u8], log: &mut Vec<Packet>) -> Result<(
     let pkt = build_write_packet(data);
     let mut tx_data = [0u8; HID_PACKET_SIZE];
     tx_data.copy_from_slice(&pkt[1..]);
-    log.push(Packet { dir: Dir::Tx, data: tx_data }); // log without report-ID
+    log.push(Packet {
+        dir: Dir::Tx,
+        data: tx_data,
+    }); // log without report-ID
     device.write(&pkt)?;
     Ok(())
 }
 
 /// Read one 64-byte HID packet with a deadline.
-fn hid_read(device: &HidDevice, deadline: Instant, log: &mut Vec<Packet>) -> Result<[u8; HID_PACKET_SIZE]> {
+fn hid_read(
+    device: &HidDevice,
+    deadline: Instant,
+    log: &mut Vec<Packet>,
+) -> Result<[u8; HID_PACKET_SIZE]> {
     let remaining = deadline
         .saturating_duration_since(Instant::now())
         .as_millis()
@@ -207,7 +222,10 @@ fn hid_read(device: &HidDevice, deadline: Instant, log: &mut Vec<Packet>) -> Res
     if n == 0 {
         return Err(anyhow!("Device read timeout (no data)"));
     }
-    log.push(Packet { dir: Dir::Rx, data: pkt });
+    log.push(Packet {
+        dir: Dir::Rx,
+        data: pkt,
+    });
     Ok(pkt)
 }
 
@@ -227,7 +245,11 @@ struct Message {
 ///   - First data byte is a single-byte control character (ENQ, EOT, ACK, NAK)
 ///   - Data ends with the ASTM tail:  … CR  ETX|ETB  CS1 CS2  CR  LF
 ///     which puts ETX/ETB at data[SIZE-5] (= pkt[SIZE-1] from start of packet)
-fn receive_message(device: &HidDevice, timeout: Duration, log: &mut Vec<Packet>) -> Result<Message> {
+fn receive_message(
+    device: &HidDevice,
+    timeout: Duration,
+    log: &mut Vec<Packet>,
+) -> Result<Message> {
     let deadline = Instant::now() + timeout;
     let mut buf: Vec<u8> = Vec::new();
 
@@ -262,7 +284,10 @@ fn decode_message(buf: &[u8]) -> Result<Message> {
     let msg_type = *buf.first().ok_or_else(|| anyhow!("Empty message buffer"))?;
 
     if msg_type != STX {
-        return Ok(Message { msg_type, frame: String::new() });
+        return Ok(Message {
+            msg_type,
+            frame: String::new(),
+        });
     }
 
     // Minimum STX frame: STX seq ETX/ETB CS1 CS2 CR LF = 7 bytes
@@ -280,14 +305,22 @@ fn decode_message(buf: &[u8]) -> Result<Message> {
     let expected = std::str::from_utf8(&buf[buf.len() - 4..buf.len() - 2]).unwrap_or("??");
     let computed = compute_checksum(checksum_region);
     if computed != expected {
-        return Err(anyhow!("Checksum mismatch (expected {expected}, computed {computed})"));
+        return Err(anyhow!(
+            "Checksum mismatch (expected {expected}, computed {computed})"
+        ));
     }
 
     // Frame content is buf[2..len-4] — includes the trailing CR+ETX/ETB.
     // Strip them so callers just see the record text.
     let content = &buf[2..buf.len() - 4];
-    let content = match content { [rest @ .., ETX | ETB] => rest, _ => content };
-    let content = match content { [rest @ .., CR] => rest, _ => content };
+    let content = match content {
+        [rest @ .., ETX | ETB] => rest,
+        _ => content,
+    };
+    let content = match content {
+        [rest @ .., CR] => rest,
+        _ => content,
+    };
 
     let frame = String::from_utf8_lossy(content).into_owned();
     Ok(Message { msg_type, frame })
@@ -320,11 +353,18 @@ fn parse_record(frame: &str) -> Result<Record> {
 fn parse_header(frame: &str) -> Result<DeviceInfo> {
     let fields: Vec<&str> = frame.split('|').collect();
     if fields.len() < 14 {
-        return Err(anyhow!("Header record has only {} fields (need 14)", fields.len()));
+        return Err(anyhow!(
+            "Header record has only {} fields (need 14)",
+            fields.len()
+        ));
     }
 
     let device_parts: Vec<&str> = fields[4].split('^').collect();
-    let model = device_parts.first().copied().unwrap_or("Unknown").to_string();
+    let model = device_parts
+        .first()
+        .copied()
+        .unwrap_or("Unknown")
+        .to_string();
     let serial_raw = device_parts.get(2).copied().unwrap_or("");
     let serial_number = parse_serial(serial_raw);
 
@@ -335,7 +375,14 @@ fn parse_header(frame: &str) -> Result<DeviceInfo> {
 
     let (low_threshold, high_threshold) = parse_thresholds(fields[5]);
 
-    Ok(DeviceInfo { model, serial_number, record_count: nrecs, device_time, low_threshold, high_threshold })
+    Ok(DeviceInfo {
+        model,
+        serial_number,
+        record_count: nrecs,
+        device_time,
+        low_threshold,
+        high_threshold,
+    })
 }
 
 /// Extract the serial number from the raw field.
@@ -431,13 +478,20 @@ fn parse_timestamp(s: &str) -> String {
     match digits.len() {
         n if n >= 14 => format!(
             "{}-{}-{}T{}:{}:{}",
-            &digits[0..4], &digits[4..6], &digits[6..8],
-            &digits[8..10], &digits[10..12], &digits[12..14]
+            &digits[0..4],
+            &digits[4..6],
+            &digits[6..8],
+            &digits[8..10],
+            &digits[10..12],
+            &digits[12..14]
         ),
         n if n >= 12 => format!(
             "{}-{}-{}T{}:{}:00",
-            &digits[0..4], &digits[4..6], &digits[6..8],
-            &digits[8..10], &digits[10..12]
+            &digits[0..4],
+            &digits[4..6],
+            &digits[6..8],
+            &digits[8..10],
+            &digits[10..12]
         ),
         _ => s.to_string(),
     }
@@ -504,7 +558,9 @@ fn get_one_record(device: &HidDevice, log: &mut Vec<Packet>) -> Result<(Record, 
             other => {
                 retries += 1;
                 if retries >= PROTO_RETRIES {
-                    return Err(anyhow!("Unexpected message byte {other:#04x} after {PROTO_RETRIES} retries"));
+                    return Err(anyhow!(
+                        "Unexpected message byte {other:#04x} after {PROTO_RETRIES} retries"
+                    ));
                 }
                 cmd = NAK;
             }
@@ -538,13 +594,19 @@ pub fn fetch_all(device: &HidDevice, progress: bool) -> Result<Session> {
                     if progress {
                         let total = device_info.record_count;
                         let n = readings.len() + 1;
-                        let pct = if total > 0 { 100 * n as u32 / total } else { 0 };
+                        let pct = (100 * n as u32).checked_div(total).unwrap_or(0);
                         eprint!(
                             "\r[{n:>3}/{total}] {pct:>3}%  {}  {:.1} {}  {}{}",
                             r.timestamp,
                             r.glucose_value,
                             r.units,
-                            if r.high { "HIGH " } else if r.low { "LOW  " } else { "     " },
+                            if r.high {
+                                "HIGH "
+                            } else if r.low {
+                                "LOW  "
+                            } else {
+                                "     "
+                            },
                             r.meal_marker.as_deref().unwrap_or(""),
                         );
                         let _ = std::io::stderr().flush();
@@ -576,7 +638,12 @@ pub fn fetch_all(device: &HidDevice, progress: bool) -> Result<Session> {
         device_info.serial_number
     );
 
-    Ok(Session { device: device_info, readings, raw_records, raw_packets: packets })
+    Ok(Session {
+        device: device_info,
+        readings,
+        raw_records,
+        raw_packets: packets,
+    })
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -622,7 +689,10 @@ mod tests {
     fn decode_stx_frame_extracts_content() {
         let msg = decode_message(&r_record_frame()).unwrap();
         assert_eq!(msg.msg_type, STX);
-        assert_eq!(msg.frame, "R|3|^^^Glucose|93|mg/dL^P||A/M0/T1||201505261150");
+        assert_eq!(
+            msg.frame,
+            "R|3|^^^Glucose|93|mg/dL^P||A/M0/T1||201505261150"
+        );
     }
 
     #[test]
@@ -803,7 +873,7 @@ mod tests {
         assert_eq!(pkt[2], 0x00); // header byte 1
         assert_eq!(pkt[3], 0x00); // header byte 2
         assert_eq!(pkt[4], 0x01); // payload length
-        assert_eq!(pkt[5], ACK);  // payload
+        assert_eq!(pkt[5], ACK); // payload
         assert!(pkt[6..].iter().all(|&b| b == 0)); // zero-padded
     }
 
