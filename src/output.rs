@@ -12,7 +12,10 @@ pub fn write(session: &Session, format: &Format, path: Option<&Path>) -> Result<
             let f = std::fs::File::create(p)?;
             write_to(session, format, BufWriter::new(f))
         }
-        None => write_to(session, format, BufWriter::new(io::stdout())),
+        None => {
+            let stdout = io::stdout();
+            write_to(session, format, BufWriter::new(stdout.lock()))
+        }
     }
 }
 
