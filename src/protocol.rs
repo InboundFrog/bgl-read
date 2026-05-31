@@ -231,10 +231,10 @@ fn receive_message(device: &HidDevice, timeout: Duration, log: &mut Vec<Packet>)
         let data = &pkt[4..data_end];
         buf.extend_from_slice(data);
 
-        let first = data.first().copied().unwrap_or(0);
+        let first = buf.first().copied().unwrap_or(0);
         let is_complete = size < MAX_PAYLOAD
             || matches!(first, ENQ | EOT | ACK | NAK)
-            || (data.len() >= 5 && matches!(data[data.len() - 5], ETX | ETB));
+            || (buf.len() >= 5 && matches!(buf[buf.len() - 5], ETX | ETB));
 
         if is_complete {
             break;
