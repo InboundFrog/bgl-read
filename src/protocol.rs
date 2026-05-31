@@ -192,7 +192,29 @@ fn build_write_packet(data: &[u8]) -> [u8; 65] {
     pkt
 }
 
-fn hid_write(device: &HidDevice, data: &[u8], log: &mut Vec<Packet>) -> Result<()> {
+/// Captures HID packets for `--format bytes`. When `capture` is false,
+/// `push` is a no-op and no allocations happen beyond the empty Vec itself.
+struct PacketLog {
+    packets: Vec<Packet>,
+    capture: bool,
+}
+
+impl PacketLog {
+    fn new(capture: bool) -> Self {
+        Self {
+            packets: Vec::new(),
+            capture,
+        }
+    }
+
+    fn push(&mut self, packet: Packet) {
+        if self.capture {
+            self.packets.push(packet);
+        }
+    }
+}
+
+fn hid_write(device: &HidDevice, data: &[u8], log: &mut PacketLog) -> Result<()> {
     let pkt = build_write_packet(data);
     let mut tx_data = [0u8; HID_PACKET_SIZE];
     tx_data.copy_from_slice(&pkt[1..]);
@@ -208,7 +230,7 @@ fn hid_write(device: &HidDevice, data: &[u8], log: &mut Vec<Packet>) -> Result<(
 fn hid_read(
     device: &HidDevice,
     deadline: Instant,
-    log: &mut Vec<Packet>,
+    log: &mut PacketLog,
 ) -> Result<[u8; HID_PACKET_SIZE]> {
     let remaining = deadline
         .saturating_duration_since(Instant::now())
@@ -245,11 +267,7 @@ struct Message {
 ///   - First data byte is a single-byte control character (ENQ, EOT, ACK, NAK)
 ///   - Data ends with the ASTM tail:  … CR  ETX|ETB  CS1 CS2  CR  LF
 ///     which puts ETX/ETB at data[SIZE-5] (= pkt[SIZE-1] from start of packet)
-fn receive_message(
-    device: &HidDevice,
-    timeout: Duration,
-    log: &mut Vec<Packet>,
-) -> Result<Message> {
+fn receive_message(device: &HidDevice, timeout: Duration, log: &mut PacketLog) -> Result<Message> {
     let deadline = Instant::now() + timeout;
     let mut buf: Vec<u8> = Vec::new();
 
@@ -518,7 +536,7 @@ fn parse_records_from_text(text: &str) -> (DeviceInfo, Vec<Reading>) {
 // ── Main session loop ─────────────────────────────────────────────────────────
 
 /// Send one command, receive one complete message, retry with NAK on transient errors.
-fn get_one_record(device: &HidDevice, log: &mut Vec<Packet>) -> Result<(Record, String)> {
+fn get_one_record(device: &HidDevice, log: &mut PacketLog) -> Result<(Record, String)> {
     let mut retries = 0u32;
     let mut cmd = ACK;
 
@@ -569,8 +587,8 @@ fn get_one_record(device: &HidDevice, log: &mut Vec<Packet>) -> Result<(Record, 
 }
 
 /// Open a session and read all records until the L terminator or EOT.
-pub fn fetch_all(device: &HidDevice, progress: bool) -> Result<Session> {
-    let mut packets: Vec<Packet> = Vec::new();
+pub fn fetch_all(device: &HidDevice, progress: bool, capture_packets: bool) -> Result<Session> {
+    let mut packets = PacketLog::new(capture_packets);
     let mut raw_records: Vec<String> = Vec::new();
     let mut device_info = DeviceInfo::default();
     let mut readings: Vec<Reading> = Vec::new();
@@ -642,7 +660,7 @@ pub fn fetch_all(device: &HidDevice, progress: bool) -> Result<Session> {
         device: device_info,
         readings,
         raw_records,
-        raw_packets: packets,
+        raw_packets: packets.packets,
     })
 }
 

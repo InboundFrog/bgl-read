@@ -39,7 +39,11 @@ fn main() -> Result<()> {
     }
 
     let device = protocol::open_device(&api)?;
-    let session = protocol::fetch_all(&device, cli.progress)?;
+    let session = protocol::fetch_all(
+        &device,
+        cli.progress,
+        matches!(cli.format, output::Format::Bytes),
+    )?;
 
     output::write(&session, &cli.format, cli.output.as_deref())
 }
