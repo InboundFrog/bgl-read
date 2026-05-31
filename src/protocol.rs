@@ -519,8 +519,7 @@ fn parse_timestamp(s: &str) -> String {
 
 /// Parse a `--format records` text dump (one ASTM frame per line) back into
 /// structured data.  Lines that cannot be parsed are silently skipped.
-#[cfg(test)]
-fn parse_records_from_text(text: &str) -> (DeviceInfo, Vec<Reading>) {
+pub fn parse_records_from_text(text: &str) -> (DeviceInfo, Vec<Reading>) {
     let mut device_info = DeviceInfo::default();
     let mut readings = Vec::new();
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
@@ -531,6 +530,24 @@ fn parse_records_from_text(text: &str) -> (DeviceInfo, Vec<Reading>) {
         }
     }
     (device_info, readings)
+}
+
+/// Build a Session from a saved `--format records` text dump.
+/// `raw_packets` is left empty — file-driven input has no HID traffic.
+pub fn session_from_records_text(text: &str) -> Session {
+    let (device, readings) = parse_records_from_text(text);
+    let raw_records = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect();
+    Session {
+        device,
+        readings,
+        raw_records,
+        raw_packets: Vec::new(),
+    }
 }
 
 // ── Main session loop ─────────────────────────────────────────────────────────
