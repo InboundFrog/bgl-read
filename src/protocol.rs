@@ -364,8 +364,8 @@ fn parse_thresholds(config: &str) -> (u32, u32) {
 
     if mmol {
         // Values were in mmol/L × 10; convert to mg/dL
-        low = ((low as f64 / 10.0) * 18.01559) as u32;
-        high = ((high as f64 / 10.0) * 18.01559) as u32;
+        low = ((low as f64 / 10.0) * 18.01559).round() as u32;
+        high = ((high as f64 / 10.0) * 18.01559).round() as u32;
     }
 
     (low, high)
@@ -677,9 +677,9 @@ mod tests {
     #[test]
     fn thresholds_mmol_converts_to_mg_dl() {
         // U=1 means mmol/L; V=02033 → lo=2 mmol/L×10=2, hi=033 mmol/L×10=3.3
-        // 2/10 * 18.01559 ≈ 3,  3.3/10 * 18.01559 ≈ 59
+        // 2/10 * 18.01559 ≈ 4,  3.3/10 * 18.01559 ≈ 59
         let (lo, hi) = parse_thresholds("U=1^V=02033");
-        assert_eq!(lo, 3);
+        assert_eq!(lo, 4);
         assert_eq!(hi, 59);
     }
 
@@ -820,13 +820,13 @@ mod tests {
 
     /// Real device config string: U=1 (mmol/L), V=06333.
     /// V field: low = "06" / 10 = 0.6 mmol/L, high = "333" / 10 = 33.3 mmol/L.
-    /// Converted to mg/dL: 0.6 × 18.01559 ≈ 10, 33.3 × 18.01559 ≈ 599.
+    /// Converted to mg/dL: 0.6 × 18.01559 ≈ 11, 33.3 × 18.01559 ≈ 600.
     #[test]
     fn thresholds_real_device_config() {
         let config = "A=1^C=6^R=0^S=1^U=1^V=06333^X=039039100072^a=1^J=0";
         let (lo, hi) = parse_thresholds(config);
-        assert_eq!(lo, 10);
-        assert_eq!(hi, 599);
+        assert_eq!(lo, 11);
+        assert_eq!(hi, 600);
     }
 
     /// The most common annotation in the real data — no meal or time context.
@@ -862,9 +862,9 @@ mod tests {
         assert_eq!(info.serial_number, "0000000");
         assert_eq!(info.record_count, 800);
         assert_eq!(info.device_time, "2020-01-01T09:00:00");
-        // U=1, V=06333 → low ≈ 10 mg/dL, high ≈ 599 mg/dL
-        assert_eq!(info.low_threshold, 10);
-        assert_eq!(info.high_threshold, 599);
+        // U=1, V=06333 → low ≈ 11 mg/dL, high ≈ 600 mg/dL
+        assert_eq!(info.low_threshold, 11);
+        assert_eq!(info.high_threshold, 600);
     }
 
     // ── parse_records_from_text / fixture round-trip ──────────────────────────
