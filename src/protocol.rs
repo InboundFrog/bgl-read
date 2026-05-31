@@ -272,7 +272,7 @@ fn decode_message(buf: &[u8]) -> Result<Message> {
     let expected = std::str::from_utf8(&buf[buf.len() - 4..buf.len() - 2]).unwrap_or("??");
     let computed = compute_checksum(checksum_region);
     if computed != expected {
-        eprintln!("Warning: checksum mismatch (expected {expected}, computed {computed})");
+        return Err(anyhow!("Checksum mismatch (expected {expected}, computed {computed})"));
     }
 
     // Frame content is buf[2..len-4] — includes the trailing CR+ETX/ETB.
