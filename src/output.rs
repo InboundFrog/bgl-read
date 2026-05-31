@@ -1,17 +1,33 @@
 use crate::protocol::Session;
-use crate::Format;
 use anyhow::Result;
+use clap::ValueEnum;
 use std::io::{self, BufWriter, Write};
+use std::path::Path;
+
+#[derive(Debug, Clone, ValueEnum)]
+pub enum Format {
+    /// Structured readings + device info as JSON
+    Json,
+    /// One reading per row as CSV
+    Csv,
+    /// Raw ASTM record text as received (H/P/R/L frames)
+    Records,
+    /// Hex dump of every HID packet sent and received
+    Bytes,
+}
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-pub fn write(session: &Session, format: &Format, path: Option<&str>) -> Result<()> {
+pub fn write(session: &Session, format: &Format, path: Option<&Path>) -> Result<()> {
     match path {
         Some(p) => {
             let f = std::fs::File::create(p)?;
             write_to(session, format, BufWriter::new(f))
         }
-        None => write_to(session, format, BufWriter::new(io::stdout())),
+        None => {
+            let stdout = io::stdout();
+            write_to(session, format, BufWriter::new(stdout.lock()))
+        }
     }
 }
 
@@ -43,7 +59,8 @@ fn write_csv<W: Write>(session: &Session, w: &mut W) -> Result<()> {
     wtr.write_record([
         "record_number",
         "timestamp",
-        "glucose_value",
+        "analyte",
+        "value",
         "units",
         "high",
         "low",
@@ -53,7 +70,8 @@ fn write_csv<W: Write>(session: &Session, w: &mut W) -> Result<()> {
         wtr.write_record([
             r.record_number.to_string(),
             r.timestamp.clone(),
-            r.glucose_value.to_string(),
+            r.analyte.clone(),
+            r.value.to_string(),
             r.units.clone(),
             r.high.to_string(),
             r.low.to_string(),
@@ -90,19 +108,27 @@ fn hex_dump<W: Write>(data: &[u8], w: &mut W) -> Result<()> {
         write!(w, "{:04x}  ", row * 16)?;
         // Hex bytes
         for (i, b) in chunk.iter().enumerate() {
-            if i == 8 { write!(w, " ")?; }
+            if i == 8 {
+                write!(w, " ")?;
+            }
             write!(w, "{b:02x} ")?;
         }
         // Padding if last row is short
         let pad = 16 - chunk.len();
         for i in 0..pad {
-            if chunk.len() + i == 8 { write!(w, " ")?; }
+            if chunk.len() + i == 8 {
+                write!(w, " ")?;
+            }
             write!(w, "   ")?;
         }
         // ASCII sidebar
         write!(w, " |")?;
         for &b in chunk {
-            let c = if b.is_ascii_graphic() || b == b' ' { b as char } else { '.' };
+            let c = if b.is_ascii_graphic() || b == b' ' {
+                b as char
+            } else {
+                '.'
+            };
             write!(w, "{c}")?;
         }
         writeln!(w, "|")?;

@@ -2,19 +2,9 @@ mod output;
 mod protocol;
 
 use anyhow::Result;
-use clap::{Parser, ValueEnum};
-
-#[derive(Debug, Clone, ValueEnum)]
-pub enum Format {
-    /// Structured readings + device info as JSON
-    Json,
-    /// One reading per row as CSV
-    Csv,
-    /// Raw ASTM record text as received (H/P/R/L frames)
-    Records,
-    /// Hex dump of every HID packet sent and received
-    Bytes,
-}
+use clap::Parser;
+use output::Format;
+use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -27,7 +17,7 @@ struct Cli {
 
     /// Write output to FILE instead of stdout
     #[arg(short, long, value_name = "FILE")]
-    output: Option<String>,
+    output: Option<PathBuf>,
 
     /// List connected Contour devices and exit
     #[arg(short, long)]
@@ -36,20 +26,34 @@ struct Cli {
     /// Show a live progress line on stderr while reading
     #[arg(short, long)]
     progress: bool,
+
+    /// Parse a saved `--format records` file instead of reading from a meter
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["list", "progress"])]
+    from_records: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let api = hidapi::HidApi::new()?;
-
     if cli.list {
+        let api = hidapi::HidApi::new()?;
         protocol::list_devices(&api);
         return Ok(());
     }
 
+    if let Some(path) = cli.from_records.as_deref() {
+        let text = std::fs::read_to_string(path)?;
+        let session = protocol::session_from_records_text(&text);
+        return output::write(&session, &cli.format, cli.output.as_deref());
+    }
+
+    let api = hidapi::HidApi::new()?;
     let device = protocol::open_device(&api)?;
-    let session = protocol::fetch_all(&device, cli.progress)?;
+    let session = protocol::fetch_all(
+        &device,
+        cli.progress,
+        matches!(cli.format, output::Format::Bytes),
+    )?;
 
     output::write(&session, &cli.format, cli.output.as_deref())
 }

@@ -17,7 +17,7 @@
 //!   STX  seq_digit  record_text  CR  ETX|ETB  CS1  CS2  CR  LF
 //! Checksum covers: seq_digit through ETX/ETB (inclusive), sum of bytes mod 256, uppercase hex.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use hidapi::{HidApi, HidDevice};
 use serde::Serialize;
 use std::fmt;
@@ -53,7 +53,11 @@ const CR: u8 = 0x0D;
 const HID_PACKET_SIZE: usize = 64;
 // Maximum data bytes per HID packet = 64 total - 4 overhead (3 header + 1 length byte)
 const MAX_PAYLOAD: usize = HID_PACKET_SIZE - 4;
-const MAX_RETRIES: u32 = 6;
+/// Transient I/O retries (receive_message returned Err).
+const IO_RETRIES: u32 = 6;
+/// Protocol-violation retries (unexpected message type or parse failure).
+const PROTO_RETRIES: u32 = 6;
+const RECEIVE_TIMEOUT: Duration = Duration::from_secs(10);
 
 // ── Public data types ─────────────────────────────────────────────────────────
 
@@ -84,7 +88,8 @@ impl Default for DeviceInfo {
 #[derive(Debug, Serialize, Clone)]
 pub struct Reading {
     pub record_number: u32,
-    pub glucose_value: f64,
+    pub analyte: String,
+    pub value: f64,
     /// "mg/dL" or "mmol/L"
     pub units: String,
     /// Device local time, ISO 8601 (no TZ)
@@ -106,15 +111,18 @@ pub enum Dir {
 
 impl fmt::Display for Dir {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self { Dir::Tx => "TX", Dir::Rx => "RX" })
+        f.write_str(match self {
+            Dir::Tx => "TX",
+            Dir::Rx => "RX",
+        })
     }
 }
 
 /// One captured HID packet (raw 64 bytes + direction).
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Clone)]
 pub struct Packet {
     pub dir: Dir,
-    pub data: Vec<u8>,
+    pub data: [u8; HID_PACKET_SIZE],
 }
 
 /// Everything captured during a session.
@@ -125,6 +133,7 @@ pub struct Session {
     /// Raw ASTM record frame strings, in order received (H, P, R…, L)
     pub raw_records: Vec<String>,
     /// Every HID packet exchanged, in order
+    #[serde(skip)]
     pub raw_packets: Vec<Packet>,
 }
 
@@ -171,6 +180,12 @@ pub fn open_device(api: &HidApi) -> Result<HidDevice> {
 
 /// Build a 65-byte write buffer (report-ID + 64 payload bytes).
 fn build_write_packet(data: &[u8]) -> [u8; 65] {
+    debug_assert!(
+        data.len() <= MAX_PAYLOAD,
+        "write payload {} exceeds MAX_PAYLOAD {}",
+        data.len(),
+        MAX_PAYLOAD
+    );
     // Layout: [report_id=0, hdr0=0, hdr1=0, hdr2=0, length, data..., padding]
     let mut pkt = [0u8; 65];
     pkt[4] = data.len() as u8;
@@ -178,15 +193,46 @@ fn build_write_packet(data: &[u8]) -> [u8; 65] {
     pkt
 }
 
-fn hid_write(device: &HidDevice, data: &[u8], log: &mut Vec<Packet>) -> Result<()> {
+/// Captures HID packets for `--format bytes`. When `capture` is false,
+/// `push` is a no-op and no allocations happen beyond the empty Vec itself.
+struct PacketLog {
+    packets: Vec<Packet>,
+    capture: bool,
+}
+
+impl PacketLog {
+    fn new(capture: bool) -> Self {
+        Self {
+            packets: Vec::new(),
+            capture,
+        }
+    }
+
+    fn push(&mut self, packet: Packet) {
+        if self.capture {
+            self.packets.push(packet);
+        }
+    }
+}
+
+fn hid_write(device: &HidDevice, data: &[u8], log: &mut PacketLog) -> Result<()> {
     let pkt = build_write_packet(data);
-    log.push(Packet { dir: Dir::Tx, data: pkt[1..].to_vec() }); // log without report-ID
+    let mut tx_data = [0u8; HID_PACKET_SIZE];
+    tx_data.copy_from_slice(&pkt[1..]);
+    log.push(Packet {
+        dir: Dir::Tx,
+        data: tx_data,
+    }); // log without report-ID
     device.write(&pkt)?;
     Ok(())
 }
 
 /// Read one 64-byte HID packet with a deadline.
-fn hid_read(device: &HidDevice, deadline: Instant, log: &mut Vec<Packet>) -> Result<[u8; HID_PACKET_SIZE]> {
+fn hid_read(
+    device: &HidDevice,
+    deadline: Instant,
+    log: &mut PacketLog,
+) -> Result<[u8; HID_PACKET_SIZE]> {
     let remaining = deadline
         .saturating_duration_since(Instant::now())
         .as_millis()
@@ -199,7 +245,10 @@ fn hid_read(device: &HidDevice, deadline: Instant, log: &mut Vec<Packet>) -> Res
     if n == 0 {
         return Err(anyhow!("Device read timeout (no data)"));
     }
-    log.push(Packet { dir: Dir::Rx, data: pkt.to_vec() });
+    log.push(Packet {
+        dir: Dir::Rx,
+        data: pkt,
+    });
     Ok(pkt)
 }
 
@@ -219,7 +268,7 @@ struct Message {
 ///   - First data byte is a single-byte control character (ENQ, EOT, ACK, NAK)
 ///   - Data ends with the ASTM tail:  … CR  ETX|ETB  CS1 CS2  CR  LF
 ///     which puts ETX/ETB at data[SIZE-5] (= pkt[SIZE-1] from start of packet)
-fn receive_message(device: &HidDevice, timeout: Duration, log: &mut Vec<Packet>) -> Result<Message> {
+fn receive_message(device: &HidDevice, timeout: Duration, log: &mut PacketLog) -> Result<Message> {
     let deadline = Instant::now() + timeout;
     let mut buf: Vec<u8> = Vec::new();
 
@@ -231,10 +280,10 @@ fn receive_message(device: &HidDevice, timeout: Duration, log: &mut Vec<Packet>)
         let data = &pkt[4..data_end];
         buf.extend_from_slice(data);
 
-        let first = data.first().copied().unwrap_or(0);
+        let first = buf.first().copied().unwrap_or(0);
         let is_complete = size < MAX_PAYLOAD
             || matches!(first, ENQ | EOT | ACK | NAK)
-            || (data.len() >= 5 && matches!(data[data.len() - 5], ETX | ETB));
+            || (buf.len() >= 5 && matches!(buf[buf.len() - 5], ETX | ETB));
 
         if is_complete {
             break;
@@ -254,7 +303,10 @@ fn decode_message(buf: &[u8]) -> Result<Message> {
     let msg_type = *buf.first().ok_or_else(|| anyhow!("Empty message buffer"))?;
 
     if msg_type != STX {
-        return Ok(Message { msg_type, frame: String::new() });
+        return Ok(Message {
+            msg_type,
+            frame: String::new(),
+        });
     }
 
     // Minimum STX frame: STX seq ETX/ETB CS1 CS2 CR LF = 7 bytes
@@ -272,14 +324,22 @@ fn decode_message(buf: &[u8]) -> Result<Message> {
     let expected = std::str::from_utf8(&buf[buf.len() - 4..buf.len() - 2]).unwrap_or("??");
     let computed = compute_checksum(checksum_region);
     if computed != expected {
-        eprintln!("Warning: checksum mismatch (expected {expected}, computed {computed})");
+        return Err(anyhow!(
+            "Checksum mismatch (expected {expected}, computed {computed})"
+        ));
     }
 
     // Frame content is buf[2..len-4] — includes the trailing CR+ETX/ETB.
     // Strip them so callers just see the record text.
     let content = &buf[2..buf.len() - 4];
-    let content = match content { [rest @ .., ETX | ETB] => rest, _ => content };
-    let content = match content { [rest @ .., CR] => rest, _ => content };
+    let content = match content {
+        [rest @ .., ETX | ETB] => rest,
+        _ => content,
+    };
+    let content = match content {
+        [rest @ .., CR] => rest,
+        _ => content,
+    };
 
     let frame = String::from_utf8_lossy(content).into_owned();
     Ok(Message { msg_type, frame })
@@ -291,7 +351,7 @@ fn decode_message(buf: &[u8]) -> Result<Message> {
 enum Record {
     Header(DeviceInfo),
     Result(Reading),
-    Patient,
+    Skip,
     Terminator,
     EndOfTransmission,
 }
@@ -301,7 +361,14 @@ fn parse_record(frame: &str) -> Result<Record> {
         Some('H') => Ok(Record::Header(parse_header(frame)?)),
         Some('R') => parse_result_record(frame),
         Some('L') => Ok(Record::Terminator),
-        Some('P') => Ok(Record::Patient),
+        // Recognised but ignored ASTM E1394 record types:
+        //   P = Patient
+        //   C = Comment
+        //   O = Order / test request
+        //   M = Manufacturer-specific
+        //   Q = Query / inquiry
+        //   S = Scientific
+        Some('P' | 'C' | 'O' | 'M' | 'Q' | 'S') => Ok(Record::Skip),
         Some(c) => Err(anyhow!("Unknown record type '{c}' in frame: {frame:?}")),
         None => Err(anyhow!("Empty frame")),
     }
@@ -312,11 +379,18 @@ fn parse_record(frame: &str) -> Result<Record> {
 fn parse_header(frame: &str) -> Result<DeviceInfo> {
     let fields: Vec<&str> = frame.split('|').collect();
     if fields.len() < 14 {
-        return Err(anyhow!("Header record has only {} fields (need 14)", fields.len()));
+        return Err(anyhow!(
+            "Header record has only {} fields (need 14)",
+            fields.len()
+        ));
     }
 
     let device_parts: Vec<&str> = fields[4].split('^').collect();
-    let model = device_parts.first().copied().unwrap_or("Unknown").to_string();
+    let model = device_parts
+        .first()
+        .copied()
+        .unwrap_or("Unknown")
+        .to_string();
     let serial_raw = device_parts.get(2).copied().unwrap_or("");
     let serial_number = parse_serial(serial_raw);
 
@@ -327,7 +401,14 @@ fn parse_header(frame: &str) -> Result<DeviceInfo> {
 
     let (low_threshold, high_threshold) = parse_thresholds(fields[5]);
 
-    Ok(DeviceInfo { model, serial_number, record_count: nrecs, device_time, low_threshold, high_threshold })
+    Ok(DeviceInfo {
+        model,
+        serial_number,
+        record_count: nrecs,
+        device_time,
+        low_threshold,
+        high_threshold,
+    })
 }
 
 /// Extract the serial number from the raw field.
@@ -363,8 +444,8 @@ fn parse_thresholds(config: &str) -> (u32, u32) {
 
     if mmol {
         // Values were in mmol/L × 10; convert to mg/dL
-        low = ((low as f64 / 10.0) * 18.01559) as u32;
-        high = ((high as f64 / 10.0) * 18.01559) as u32;
+        low = ((low as f64 / 10.0) * 18.01559).round() as u32;
+        high = ((high as f64 / 10.0) * 18.01559).round() as u32;
     }
 
     (low, high)
@@ -375,13 +456,21 @@ fn parse_thresholds(config: &str) -> (u32, u32) {
 fn parse_result_record(frame: &str) -> Result<Record> {
     let fields: Vec<&str> = frame.split('|').collect();
 
-    // Need at least 9 fields; field[2] must be "^^^Glucose"
-    if fields.len() < 9 || !fields[2].starts_with("^^^Glucose") {
-        return Ok(Record::Patient); // non-glucose result, skip
+    if fields.len() < 9 {
+        return Ok(Record::Skip);
+    }
+
+    // Field 2 (1-based: field 3) is "^^^Analyte[^subcomponents...]"
+    let analyte = match fields[2].strip_prefix("^^^") {
+        Some(rest) => rest.split('^').next().unwrap_or("").trim().to_string(),
+        None => return Ok(Record::Skip),
+    };
+    if analyte.is_empty() {
+        return Ok(Record::Skip);
     }
 
     let record_number: u32 = fields[1].parse().unwrap_or(0);
-    let glucose_value: f64 = fields[3].parse().unwrap_or(0.0);
+    let value: f64 = fields[3].parse().unwrap_or(0.0);
     let units = fields[4].split('^').next().unwrap_or("mg/dL").to_string();
 
     // fields[6] is the annotation / marker field, e.g. "A/M0/T1", ">", "C"
@@ -396,7 +485,8 @@ fn parse_result_record(frame: &str) -> Result<Record> {
 
     Ok(Record::Result(Reading {
         record_number,
-        glucose_value,
+        analyte,
+        value,
         units,
         timestamp,
         high,
@@ -423,13 +513,20 @@ fn parse_timestamp(s: &str) -> String {
     match digits.len() {
         n if n >= 14 => format!(
             "{}-{}-{}T{}:{}:{}",
-            &digits[0..4], &digits[4..6], &digits[6..8],
-            &digits[8..10], &digits[10..12], &digits[12..14]
+            &digits[0..4],
+            &digits[4..6],
+            &digits[6..8],
+            &digits[8..10],
+            &digits[10..12],
+            &digits[12..14]
         ),
         n if n >= 12 => format!(
             "{}-{}-{}T{}:{}:00",
-            &digits[0..4], &digits[4..6], &digits[6..8],
-            &digits[8..10], &digits[10..12]
+            &digits[0..4],
+            &digits[4..6],
+            &digits[6..8],
+            &digits[8..10],
+            &digits[10..12]
         ),
         _ => s.to_string(),
     }
@@ -439,8 +536,7 @@ fn parse_timestamp(s: &str) -> String {
 
 /// Parse a `--format records` text dump (one ASTM frame per line) back into
 /// structured data.  Lines that cannot be parsed are silently skipped.
-#[cfg(test)]
-fn parse_records_from_text(text: &str) -> (DeviceInfo, Vec<Reading>) {
+pub fn parse_records_from_text(text: &str) -> (DeviceInfo, Vec<Reading>) {
     let mut device_info = DeviceInfo::default();
     let mut readings = Vec::new();
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
@@ -453,10 +549,28 @@ fn parse_records_from_text(text: &str) -> (DeviceInfo, Vec<Reading>) {
     (device_info, readings)
 }
 
+/// Build a Session from a saved `--format records` text dump.
+/// `raw_packets` is left empty — file-driven input has no HID traffic.
+pub fn session_from_records_text(text: &str) -> Session {
+    let (device, readings) = parse_records_from_text(text);
+    let raw_records = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect();
+    Session {
+        device,
+        readings,
+        raw_records,
+        raw_packets: Vec::new(),
+    }
+}
+
 // ── Main session loop ─────────────────────────────────────────────────────────
 
 /// Send one command, receive one complete message, retry with NAK on transient errors.
-fn get_one_record(device: &HidDevice, log: &mut Vec<Packet>) -> Result<(Record, String)> {
+fn get_one_record(device: &HidDevice, log: &mut PacketLog) -> Result<(Record, String)> {
     let mut retries = 0u32;
     let mut cmd = ACK;
 
@@ -464,14 +578,14 @@ fn get_one_record(device: &HidDevice, log: &mut Vec<Packet>) -> Result<(Record, 
         hid_write(device, &[cmd], log)?;
         cmd = ACK;
 
-        let msg = match receive_message(device, Duration::from_secs(10), log) {
+        let msg = match receive_message(device, RECEIVE_TIMEOUT, log) {
             Ok(m) => m,
             Err(e) => {
                 retries += 1;
-                if retries >= MAX_RETRIES {
+                if retries >= IO_RETRIES {
                     return Err(e);
                 }
-                eprintln!("Receive error ({retries}/{MAX_RETRIES}): {e}");
+                eprintln!("Receive error ({retries}/{IO_RETRIES}): {e}");
                 cmd = NAK;
                 continue;
             }
@@ -482,14 +596,23 @@ fn get_one_record(device: &HidDevice, log: &mut Vec<Packet>) -> Result<(Record, 
             ENQ => continue,
             EOT => return Ok((Record::EndOfTransmission, String::new())),
             ACK => continue,
-            STX => {
-                let record = parse_record(&msg.frame)?;
-                return Ok((record, msg.frame));
-            }
+            STX => match parse_record(&msg.frame) {
+                Ok(record) => return Ok((record, msg.frame)),
+                Err(e) => {
+                    retries += 1;
+                    if retries >= PROTO_RETRIES {
+                        return Err(e);
+                    }
+                    eprintln!("Parse error ({retries}/{PROTO_RETRIES}): {e}");
+                    cmd = NAK;
+                }
+            },
             other => {
                 retries += 1;
-                if retries >= MAX_RETRIES {
-                    return Err(anyhow!("Unexpected message byte {other:#04x} after {MAX_RETRIES} retries"));
+                if retries >= PROTO_RETRIES {
+                    return Err(anyhow!(
+                        "Unexpected message byte {other:#04x} after {PROTO_RETRIES} retries"
+                    ));
                 }
                 cmd = NAK;
             }
@@ -498,8 +621,8 @@ fn get_one_record(device: &HidDevice, log: &mut Vec<Packet>) -> Result<(Record, 
 }
 
 /// Open a session and read all records until the L terminator or EOT.
-pub fn fetch_all(device: &HidDevice, progress: bool) -> Result<Session> {
-    let mut packets: Vec<Packet> = Vec::new();
+pub fn fetch_all(device: &HidDevice, progress: bool, capture_packets: bool) -> Result<Session> {
+    let mut packets = PacketLog::new(capture_packets);
     let mut raw_records: Vec<String> = Vec::new();
     let mut device_info = DeviceInfo::default();
     let mut readings: Vec<Reading> = Vec::new();
@@ -523,13 +646,19 @@ pub fn fetch_all(device: &HidDevice, progress: bool) -> Result<Session> {
                     if progress {
                         let total = device_info.record_count;
                         let n = readings.len() + 1;
-                        let pct = if total > 0 { 100 * n as u32 / total } else { 0 };
+                        let pct = (100 * n as u32).checked_div(total).unwrap_or(0);
                         eprint!(
                             "\r[{n:>3}/{total}] {pct:>3}%  {}  {:.1} {}  {}{}",
                             r.timestamp,
-                            r.glucose_value,
+                            r.value,
                             r.units,
-                            if r.high { "HIGH " } else if r.low { "LOW  " } else { "     " },
+                            if r.high {
+                                "HIGH "
+                            } else if r.low {
+                                "LOW  "
+                            } else {
+                                "     "
+                            },
                             r.meal_marker.as_deref().unwrap_or(""),
                         );
                         let _ = std::io::stderr().flush();
@@ -537,9 +666,12 @@ pub fn fetch_all(device: &HidDevice, progress: bool) -> Result<Session> {
                     readings.push(r);
                 }
             }
-            Record::Patient => {}
+            Record::Skip => {}
             Record::Terminator => {
-                // Send final ACK and wait for EOT
+                // Best-effort: send final ACK and wait for EOT.
+                // The L record means the device is done and all readings
+                // are already captured, so any error during this trailing
+                // handshake is not a session failure.
                 let _ = get_one_record(device, &mut packets);
                 break;
             }
@@ -558,7 +690,12 @@ pub fn fetch_all(device: &HidDevice, progress: bool) -> Result<Session> {
         device_info.serial_number
     );
 
-    Ok(Session { device: device_info, readings, raw_records, raw_packets: packets })
+    Ok(Session {
+        device: device_info,
+        readings,
+        raw_records,
+        raw_packets: packets.packets,
+    })
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -604,7 +741,10 @@ mod tests {
     fn decode_stx_frame_extracts_content() {
         let msg = decode_message(&r_record_frame()).unwrap();
         assert_eq!(msg.msg_type, STX);
-        assert_eq!(msg.frame, "R|3|^^^Glucose|93|mg/dL^P||A/M0/T1||201505261150");
+        assert_eq!(
+            msg.frame,
+            "R|3|^^^Glucose|93|mg/dL^P||A/M0/T1||201505261150"
+        );
     }
 
     #[test]
@@ -669,9 +809,9 @@ mod tests {
     #[test]
     fn thresholds_mmol_converts_to_mg_dl() {
         // U=1 means mmol/L; V=02033 → lo=2 mmol/L×10=2, hi=033 mmol/L×10=3.3
-        // 2/10 * 18.01559 ≈ 3,  3.3/10 * 18.01559 ≈ 59
+        // 2/10 * 18.01559 ≈ 4,  3.3/10 * 18.01559 ≈ 59
         let (lo, hi) = parse_thresholds("U=1^V=02033");
-        assert_eq!(lo, 3);
+        assert_eq!(lo, 4);
         assert_eq!(hi, 59);
     }
 
@@ -703,6 +843,51 @@ mod tests {
         assert_eq!(parse_meal_marker(""), None);
     }
 
+    #[test]
+    fn parse_record_accepts_comment() {
+        assert!(matches!(
+            parse_record("C|1|I|free text|G").unwrap(),
+            Record::Skip
+        ));
+    }
+
+    #[test]
+    fn parse_record_accepts_order() {
+        assert!(matches!(
+            parse_record("O|1|sample|^^^Glucose|R||||").unwrap(),
+            Record::Skip
+        ));
+    }
+
+    #[test]
+    fn parse_record_accepts_manufacturer() {
+        assert!(matches!(
+            parse_record("M|1|^^^vendor-specific").unwrap(),
+            Record::Skip
+        ));
+    }
+
+    #[test]
+    fn parse_record_accepts_query() {
+        assert!(matches!(
+            parse_record("Q|1|^^^patientID").unwrap(),
+            Record::Skip
+        ));
+    }
+
+    #[test]
+    fn parse_record_accepts_scientific() {
+        assert!(matches!(
+            parse_record("S|1|^^^analysis").unwrap(),
+            Record::Skip
+        ));
+    }
+
+    #[test]
+    fn parse_record_rejects_unknown_letter() {
+        assert!(parse_record("Z|1|junk").is_err());
+    }
+
     // ── parse_result_record ───────────────────────────────────────────────────
 
     fn parse_r(frame: &str) -> Reading {
@@ -716,7 +901,8 @@ mod tests {
     fn result_normal_mg_dl() {
         let r = parse_r("R|3|^^^Glucose|93|mg/dL^P||A/M0/T1||201505261150");
         assert_eq!(r.record_number, 3);
-        assert_eq!(r.glucose_value, 93.0);
+        assert_eq!(r.analyte, "Glucose");
+        assert_eq!(r.value, 93.0);
         assert_eq!(r.units, "mg/dL");
         assert_eq!(r.timestamp, "2015-05-26T11:50:00");
         assert!(!r.high);
@@ -728,9 +914,26 @@ mod tests {
     #[test]
     fn result_mmol_l() {
         let r = parse_r("R|1|^^^Glucose|5.4|mmol/L^P||B/M0/T1||202411030845");
-        assert_eq!(r.glucose_value, 5.4);
+        assert_eq!(r.analyte, "Glucose");
+        assert_eq!(r.value, 5.4);
         assert_eq!(r.units, "mmol/L");
         assert_eq!(r.meal_marker, Some("pre-meal".to_string()));
+    }
+
+    #[test]
+    fn result_non_glucose_analyte_kept() {
+        let r = parse_r("R|10|^^^Ketone|0.4|mmol/L^P||N||201505261150");
+        assert_eq!(r.analyte, "Ketone");
+        assert_eq!(r.value, 0.4);
+        assert_eq!(r.units, "mmol/L");
+        assert!(!r.is_control);
+    }
+
+    #[test]
+    fn result_missing_analyte_prefix_skipped() {
+        // Field 2 not starting with "^^^" — malformed; skip rather than panic
+        let frame = "R|1|Glucose|93|mg/dL^P||A/M0/T1||201505261150";
+        assert!(matches!(parse_result_record(frame).unwrap(), Record::Skip));
     }
 
     #[test]
@@ -785,7 +988,7 @@ mod tests {
         assert_eq!(pkt[2], 0x00); // header byte 1
         assert_eq!(pkt[3], 0x00); // header byte 2
         assert_eq!(pkt[4], 0x01); // payload length
-        assert_eq!(pkt[5], ACK);  // payload
+        assert_eq!(pkt[5], ACK); // payload
         assert!(pkt[6..].iter().all(|&b| b == 0)); // zero-padded
     }
 
@@ -812,13 +1015,13 @@ mod tests {
 
     /// Real device config string: U=1 (mmol/L), V=06333.
     /// V field: low = "06" / 10 = 0.6 mmol/L, high = "333" / 10 = 33.3 mmol/L.
-    /// Converted to mg/dL: 0.6 × 18.01559 ≈ 10, 33.3 × 18.01559 ≈ 599.
+    /// Converted to mg/dL: 0.6 × 18.01559 ≈ 11, 33.3 × 18.01559 ≈ 600.
     #[test]
     fn thresholds_real_device_config() {
         let config = "A=1^C=6^R=0^S=1^U=1^V=06333^X=039039100072^a=1^J=0";
         let (lo, hi) = parse_thresholds(config);
-        assert_eq!(lo, 10);
-        assert_eq!(hi, 599);
+        assert_eq!(lo, 11);
+        assert_eq!(hi, 600);
     }
 
     /// The most common annotation in the real data — no meal or time context.
@@ -854,9 +1057,9 @@ mod tests {
         assert_eq!(info.serial_number, "0000000");
         assert_eq!(info.record_count, 800);
         assert_eq!(info.device_time, "2020-01-01T09:00:00");
-        // U=1, V=06333 → low ≈ 10 mg/dL, high ≈ 599 mg/dL
-        assert_eq!(info.low_threshold, 10);
-        assert_eq!(info.high_threshold, 599);
+        // U=1, V=06333 → low ≈ 11 mg/dL, high ≈ 600 mg/dL
+        assert_eq!(info.low_threshold, 11);
+        assert_eq!(info.high_threshold, 600);
     }
 
     // ── parse_records_from_text / fixture round-trip ──────────────────────────
@@ -885,7 +1088,7 @@ mod tests {
     fn fixture_first_reading() {
         let (_, readings) = parse_records_from_text(FIXTURE);
         let r = &readings[0];
-        assert_eq!(r.glucose_value, 7.4);
+        assert_eq!(r.value, 7.4);
         assert_eq!(r.units, "mmol/L");
         assert_eq!(r.timestamp, "2020-01-01T09:00:00");
         assert_eq!(r.meal_marker, None);
