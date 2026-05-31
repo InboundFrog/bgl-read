@@ -115,10 +115,10 @@ impl fmt::Display for Dir {
 }
 
 /// One captured HID packet (raw 64 bytes + direction).
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Clone)]
 pub struct Packet {
     pub dir: Dir,
-    pub data: Vec<u8>,
+    pub data: [u8; HID_PACKET_SIZE],
 }
 
 /// Everything captured during a session.
@@ -129,6 +129,7 @@ pub struct Session {
     /// Raw ASTM record frame strings, in order received (H, P, R…, L)
     pub raw_records: Vec<String>,
     /// Every HID packet exchanged, in order
+    #[serde(skip)]
     pub raw_packets: Vec<Packet>,
 }
 
@@ -185,7 +186,9 @@ fn build_write_packet(data: &[u8]) -> [u8; 65] {
 
 fn hid_write(device: &HidDevice, data: &[u8], log: &mut Vec<Packet>) -> Result<()> {
     let pkt = build_write_packet(data);
-    log.push(Packet { dir: Dir::Tx, data: pkt[1..].to_vec() }); // log without report-ID
+    let mut tx_data = [0u8; HID_PACKET_SIZE];
+    tx_data.copy_from_slice(&pkt[1..]);
+    log.push(Packet { dir: Dir::Tx, data: tx_data }); // log without report-ID
     device.write(&pkt)?;
     Ok(())
 }
@@ -204,7 +207,7 @@ fn hid_read(device: &HidDevice, deadline: Instant, log: &mut Vec<Packet>) -> Res
     if n == 0 {
         return Err(anyhow!("Device read timeout (no data)"));
     }
-    log.push(Packet { dir: Dir::Rx, data: pkt.to_vec() });
+    log.push(Packet { dir: Dir::Rx, data: pkt });
     Ok(pkt)
 }
 
