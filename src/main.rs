@@ -2,20 +2,9 @@ mod output;
 mod protocol;
 
 use anyhow::Result;
-use clap::{Parser, ValueEnum};
+use clap::Parser;
+use output::Format;
 use std::path::PathBuf;
-
-#[derive(Debug, Clone, ValueEnum)]
-pub enum Format {
-    /// Structured readings + device info as JSON
-    Json,
-    /// One reading per row as CSV
-    Csv,
-    /// Raw ASTM record text as received (H/P/R/L frames)
-    Records,
-    /// Hex dump of every HID packet sent and received
-    Bytes,
-}
 
 #[derive(Parser, Debug)]
 #[command(

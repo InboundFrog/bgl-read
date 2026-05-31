@@ -1,8 +1,20 @@
 use crate::protocol::Session;
-use crate::Format;
 use anyhow::Result;
+use clap::ValueEnum;
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
+
+#[derive(Debug, Clone, ValueEnum)]
+pub enum Format {
+    /// Structured readings + device info as JSON
+    Json,
+    /// One reading per row as CSV
+    Csv,
+    /// Raw ASTM record text as received (H/P/R/L frames)
+    Records,
+    /// Hex dump of every HID packet sent and received
+    Bytes,
+}
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
