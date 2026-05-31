@@ -361,7 +361,14 @@ fn parse_record(frame: &str) -> Result<Record> {
         Some('H') => Ok(Record::Header(parse_header(frame)?)),
         Some('R') => parse_result_record(frame),
         Some('L') => Ok(Record::Terminator),
-        Some('P') => Ok(Record::Skip),
+        // Recognised but ignored ASTM E1394 record types:
+        //   P = Patient
+        //   C = Comment
+        //   O = Order / test request
+        //   M = Manufacturer-specific
+        //   Q = Query / inquiry
+        //   S = Scientific
+        Some('P' | 'C' | 'O' | 'M' | 'Q' | 'S') => Ok(Record::Skip),
         Some(c) => Err(anyhow!("Unknown record type '{c}' in frame: {frame:?}")),
         None => Err(anyhow!("Empty frame")),
     }
@@ -834,6 +841,51 @@ mod tests {
     #[test]
     fn meal_marker_none_for_empty() {
         assert_eq!(parse_meal_marker(""), None);
+    }
+
+    #[test]
+    fn parse_record_accepts_comment() {
+        assert!(matches!(
+            parse_record("C|1|I|free text|G").unwrap(),
+            Record::Skip
+        ));
+    }
+
+    #[test]
+    fn parse_record_accepts_order() {
+        assert!(matches!(
+            parse_record("O|1|sample|^^^Glucose|R||||").unwrap(),
+            Record::Skip
+        ));
+    }
+
+    #[test]
+    fn parse_record_accepts_manufacturer() {
+        assert!(matches!(
+            parse_record("M|1|^^^vendor-specific").unwrap(),
+            Record::Skip
+        ));
+    }
+
+    #[test]
+    fn parse_record_accepts_query() {
+        assert!(matches!(
+            parse_record("Q|1|^^^patientID").unwrap(),
+            Record::Skip
+        ));
+    }
+
+    #[test]
+    fn parse_record_accepts_scientific() {
+        assert!(matches!(
+            parse_record("S|1|^^^analysis").unwrap(),
+            Record::Skip
+        ));
+    }
+
+    #[test]
+    fn parse_record_rejects_unknown_letter() {
+        assert!(parse_record("Z|1|junk").is_err());
     }
 
     // ── parse_result_record ───────────────────────────────────────────────────
