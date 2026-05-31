@@ -2,10 +2,11 @@ use crate::protocol::Session;
 use crate::Format;
 use anyhow::Result;
 use std::io::{self, BufWriter, Write};
+use std::path::Path;
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-pub fn write(session: &Session, format: &Format, path: Option<&str>) -> Result<()> {
+pub fn write(session: &Session, format: &Format, path: Option<&Path>) -> Result<()> {
     match path {
         Some(p) => {
             let f = std::fs::File::create(p)?;

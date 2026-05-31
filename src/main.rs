@@ -3,6 +3,7 @@ mod protocol;
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, ValueEnum)]
 pub enum Format {
@@ -27,7 +28,7 @@ struct Cli {
 
     /// Write output to FILE instead of stdout
     #[arg(short, long, value_name = "FILE")]
-    output: Option<String>,
+    output: Option<PathBuf>,
 
     /// List connected Contour devices and exit
     #[arg(short, long)]
