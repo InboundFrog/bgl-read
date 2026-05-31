@@ -59,7 +59,8 @@ fn write_csv<W: Write>(session: &Session, w: &mut W) -> Result<()> {
     wtr.write_record([
         "record_number",
         "timestamp",
-        "glucose_value",
+        "analyte",
+        "value",
         "units",
         "high",
         "low",
@@ -69,7 +70,8 @@ fn write_csv<W: Write>(session: &Session, w: &mut W) -> Result<()> {
         wtr.write_record([
             r.record_number.to_string(),
             r.timestamp.clone(),
-            r.glucose_value.to_string(),
+            r.analyte.clone(),
+            r.value.to_string(),
             r.units.clone(),
             r.high.to_string(),
             r.low.to_string(),

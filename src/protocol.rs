@@ -88,7 +88,8 @@ impl Default for DeviceInfo {
 #[derive(Debug, Serialize, Clone)]
 pub struct Reading {
     pub record_number: u32,
-    pub glucose_value: f64,
+    pub analyte: String,
+    pub value: f64,
     /// "mg/dL" or "mmol/L"
     pub units: String,
     /// Device local time, ISO 8601 (no TZ)
@@ -448,13 +449,21 @@ fn parse_thresholds(config: &str) -> (u32, u32) {
 fn parse_result_record(frame: &str) -> Result<Record> {
     let fields: Vec<&str> = frame.split('|').collect();
 
-    // Need at least 9 fields; field[2] must be "^^^Glucose"
-    if fields.len() < 9 || !fields[2].starts_with("^^^Glucose") {
-        return Ok(Record::Skip); // non-glucose result, skip
+    if fields.len() < 9 {
+        return Ok(Record::Skip);
+    }
+
+    // Field 2 (1-based: field 3) is "^^^Analyte[^subcomponents...]"
+    let analyte = match fields[2].strip_prefix("^^^") {
+        Some(rest) => rest.split('^').next().unwrap_or("").trim().to_string(),
+        None => return Ok(Record::Skip),
+    };
+    if analyte.is_empty() {
+        return Ok(Record::Skip);
     }
 
     let record_number: u32 = fields[1].parse().unwrap_or(0);
-    let glucose_value: f64 = fields[3].parse().unwrap_or(0.0);
+    let value: f64 = fields[3].parse().unwrap_or(0.0);
     let units = fields[4].split('^').next().unwrap_or("mg/dL").to_string();
 
     // fields[6] is the annotation / marker field, e.g. "A/M0/T1", ">", "C"
@@ -469,7 +478,8 @@ fn parse_result_record(frame: &str) -> Result<Record> {
 
     Ok(Record::Result(Reading {
         record_number,
-        glucose_value,
+        analyte,
+        value,
         units,
         timestamp,
         high,
@@ -633,7 +643,7 @@ pub fn fetch_all(device: &HidDevice, progress: bool, capture_packets: bool) -> R
                         eprint!(
                             "\r[{n:>3}/{total}] {pct:>3}%  {}  {:.1} {}  {}{}",
                             r.timestamp,
-                            r.glucose_value,
+                            r.value,
                             r.units,
                             if r.high {
                                 "HIGH "
@@ -839,7 +849,8 @@ mod tests {
     fn result_normal_mg_dl() {
         let r = parse_r("R|3|^^^Glucose|93|mg/dL^P||A/M0/T1||201505261150");
         assert_eq!(r.record_number, 3);
-        assert_eq!(r.glucose_value, 93.0);
+        assert_eq!(r.analyte, "Glucose");
+        assert_eq!(r.value, 93.0);
         assert_eq!(r.units, "mg/dL");
         assert_eq!(r.timestamp, "2015-05-26T11:50:00");
         assert!(!r.high);
@@ -851,9 +862,26 @@ mod tests {
     #[test]
     fn result_mmol_l() {
         let r = parse_r("R|1|^^^Glucose|5.4|mmol/L^P||B/M0/T1||202411030845");
-        assert_eq!(r.glucose_value, 5.4);
+        assert_eq!(r.analyte, "Glucose");
+        assert_eq!(r.value, 5.4);
         assert_eq!(r.units, "mmol/L");
         assert_eq!(r.meal_marker, Some("pre-meal".to_string()));
+    }
+
+    #[test]
+    fn result_non_glucose_analyte_kept() {
+        let r = parse_r("R|10|^^^Ketone|0.4|mmol/L^P||N||201505261150");
+        assert_eq!(r.analyte, "Ketone");
+        assert_eq!(r.value, 0.4);
+        assert_eq!(r.units, "mmol/L");
+        assert!(!r.is_control);
+    }
+
+    #[test]
+    fn result_missing_analyte_prefix_skipped() {
+        // Field 2 not starting with "^^^" — malformed; skip rather than panic
+        let frame = "R|1|Glucose|93|mg/dL^P||A/M0/T1||201505261150";
+        assert!(matches!(parse_result_record(frame).unwrap(), Record::Skip));
     }
 
     #[test]
@@ -1008,7 +1036,7 @@ mod tests {
     fn fixture_first_reading() {
         let (_, readings) = parse_records_from_text(FIXTURE);
         let r = &readings[0];
-        assert_eq!(r.glucose_value, 7.4);
+        assert_eq!(r.value, 7.4);
         assert_eq!(r.units, "mmol/L");
         assert_eq!(r.timestamp, "2020-01-01T09:00:00");
         assert_eq!(r.meal_marker, None);
