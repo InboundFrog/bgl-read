@@ -18,8 +18,9 @@ jobs:
       - name: Install system deps (hidapi)
         run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.85"
           components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
