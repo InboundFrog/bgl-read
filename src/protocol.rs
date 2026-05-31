@@ -547,7 +547,10 @@ pub fn fetch_all(device: &HidDevice, progress: bool) -> Result<Session> {
             }
             Record::Skip => {}
             Record::Terminator => {
-                // Send final ACK and wait for EOT
+                // Best-effort: send final ACK and wait for EOT.
+                // The L record means the device is done and all readings
+                // are already captured, so any error during this trailing
+                // handshake is not a session failure.
                 let _ = get_one_record(device, &mut packets);
                 break;
             }
