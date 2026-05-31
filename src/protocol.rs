@@ -292,7 +292,7 @@ fn decode_message(buf: &[u8]) -> Result<Message> {
 enum Record {
     Header(DeviceInfo),
     Result(Reading),
-    Patient,
+    Skip,
     Terminator,
     EndOfTransmission,
 }
@@ -302,7 +302,7 @@ fn parse_record(frame: &str) -> Result<Record> {
         Some('H') => Ok(Record::Header(parse_header(frame)?)),
         Some('R') => parse_result_record(frame),
         Some('L') => Ok(Record::Terminator),
-        Some('P') => Ok(Record::Patient),
+        Some('P') => Ok(Record::Skip),
         Some(c) => Err(anyhow!("Unknown record type '{c}' in frame: {frame:?}")),
         None => Err(anyhow!("Empty frame")),
     }
@@ -378,7 +378,7 @@ fn parse_result_record(frame: &str) -> Result<Record> {
 
     // Need at least 9 fields; field[2] must be "^^^Glucose"
     if fields.len() < 9 || !fields[2].starts_with("^^^Glucose") {
-        return Ok(Record::Patient); // non-glucose result, skip
+        return Ok(Record::Skip); // non-glucose result, skip
     }
 
     let record_number: u32 = fields[1].parse().unwrap_or(0);
@@ -545,7 +545,7 @@ pub fn fetch_all(device: &HidDevice, progress: bool) -> Result<Session> {
                     readings.push(r);
                 }
             }
-            Record::Patient => {}
+            Record::Skip => {}
             Record::Terminator => {
                 // Send final ACK and wait for EOT
                 let _ = get_one_record(device, &mut packets);
