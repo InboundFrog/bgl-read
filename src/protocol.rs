@@ -171,6 +171,7 @@ pub fn open_device(api: &HidApi) -> Result<HidDevice> {
 
 /// Build a 65-byte write buffer (report-ID + 64 payload bytes).
 fn build_write_packet(data: &[u8]) -> [u8; 65] {
+    debug_assert!(data.len() <= MAX_PAYLOAD, "write payload {} exceeds MAX_PAYLOAD {}", data.len(), MAX_PAYLOAD);
     // Layout: [report_id=0, hdr0=0, hdr1=0, hdr2=0, length, data..., padding]
     let mut pkt = [0u8; 65];
     pkt[4] = data.len() as u8;
