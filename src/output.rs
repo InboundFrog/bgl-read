@@ -135,3 +135,36 @@ fn hex_dump<W: Write>(data: &[u8], w: &mut W) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::hex_dump;
+
+    fn dump(data: &[u8]) -> String {
+        let mut buf = Vec::new();
+        hex_dump(data, &mut buf).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn hex_dump_full_rows() {
+        let data: Vec<u8> = (0..=63).collect();
+        let expected = "\
+0000  00 01 02 03 04 05 06 07  08 09 0a 0b 0c 0d 0e 0f  |................|
+0010  10 11 12 13 14 15 16 17  18 19 1a 1b 1c 1d 1e 1f  |................|
+0020  20 21 22 23 24 25 26 27  28 29 2a 2b 2c 2d 2e 2f  | !\"#$%&'()*+,-./|
+0030  30 31 32 33 34 35 36 37  38 39 3a 3b 3c 3d 3e 3f  |0123456789:;<=>?|
+";
+        assert_eq!(dump(&data), expected);
+    }
+
+    #[test]
+    fn hex_dump_short_final_row_pads_hex_column() {
+        let data: Vec<u8> = (0..20).collect();
+        let expected = "\
+0000  00 01 02 03 04 05 06 07  08 09 0a 0b 0c 0d 0e 0f  |................|
+0010  10 11 12 13                                       |....|
+";
+        assert_eq!(dump(&data), expected);
+    }
+}
