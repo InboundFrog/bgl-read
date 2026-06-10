@@ -105,9 +105,14 @@ fn write_bytes<W: Write>(session: &Session, w: &mut W) -> Result<()> {
 fn hex_dump<W: Write>(data: &[u8], w: &mut W) -> Result<()> {
     use std::fmt::Write as _;
 
+    // Reused across rows: clear() keeps capacity, so the whole dump costs
+    // two allocations regardless of length.
+    let mut hex = String::with_capacity(49);
+    let mut ascii = String::with_capacity(16);
+
     for (row, chunk) in data.chunks(16).enumerate() {
-        let mut hex = String::new();
-        let mut ascii = String::new();
+        hex.clear();
+        ascii.clear();
         for (i, &b) in chunk.iter().enumerate() {
             if i == 8 {
                 hex.push(' ');
