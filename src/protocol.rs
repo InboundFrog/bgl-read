@@ -702,6 +702,18 @@ pub fn fetch_all(device: &HidDevice, progress: bool, capture_packets: bool) -> R
         // Move to a fresh line after the progress output
         eprintln!();
     }
+
+    // An empty session — not even an H record — means the meter ended the
+    // transmission without sending anything. Observed when a new session
+    // starts too soon after the previous one. A genuinely empty (fresh)
+    // meter still sends its H/P/L records, so it does not trip this.
+    if raw_records.is_empty() {
+        return Err(anyhow!(
+            "Meter sent no records. It usually needs a short rest between \
+             sessions — wait ~10 seconds and retry."
+        ));
+    }
+
     eprintln!(
         "Done: {} readings from {} (S/N {})",
         readings.len(),
