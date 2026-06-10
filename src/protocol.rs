@@ -58,6 +58,14 @@ const IO_RETRIES: u32 = 6;
 /// Protocol-violation retries (unexpected message type or parse failure).
 const PROTO_RETRIES: u32 = 6;
 const RECEIVE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Hard cap on reassembled message size — real ASTM frames are well under 1 KiB.
+const MAX_MESSAGE_SIZE: usize = 64 * 1024;
+/// Default low/high glucose thresholds in mg/dL, used as fallbacks when the
+/// header config field is absent or unparseable.
+const DEFAULT_LOW_THRESHOLD: u32 = 20;
+const DEFAULT_HIGH_THRESHOLD: u32 = 600;
+/// mmol/L → mg/dL conversion factor for glucose.
+const MMOL_TO_MGDL: f64 = 18.01559;
 
 // ── Public data types ─────────────────────────────────────────────────────────
 
@@ -79,8 +87,8 @@ impl Default for DeviceInfo {
             serial_number: "Unknown".into(),
             record_count: 0,
             device_time: String::new(),
-            low_threshold: 20,
-            high_threshold: 600,
+            low_threshold: DEFAULT_LOW_THRESHOLD,
+            high_threshold: DEFAULT_HIGH_THRESHOLD,
         }
     }
 }
@@ -103,7 +111,7 @@ pub struct Reading {
 }
 
 /// Direction of a captured HID packet.
-#[derive(Debug, Serialize, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy)]
 pub enum Dir {
     Tx,
     Rx,
@@ -126,14 +134,13 @@ pub struct Packet {
 }
 
 /// Everything captured during a session.
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub struct Session {
     pub device: DeviceInfo,
     pub readings: Vec<Reading>,
     /// Raw ASTM record frame strings, in order received (H, P, R…, L)
     pub raw_records: Vec<String>,
     /// Every HID packet exchanged, in order
-    #[serde(skip)]
     pub raw_packets: Vec<Packet>,
 }
 
@@ -217,12 +224,12 @@ impl PacketLog {
 
 fn hid_write(device: &HidDevice, data: &[u8], log: &mut PacketLog) -> Result<()> {
     let pkt = build_write_packet(data);
-    let mut tx_data = [0u8; HID_PACKET_SIZE];
-    tx_data.copy_from_slice(&pkt[1..]);
+    // Log without the report-ID byte
+    let tx_data: [u8; HID_PACKET_SIZE] = pkt[1..].try_into().expect("pkt is 65 bytes");
     log.push(Packet {
         dir: Dir::Tx,
         data: tx_data,
-    }); // log without report-ID
+    });
     device.write(&pkt)?;
     Ok(())
 }
@@ -279,6 +286,12 @@ fn receive_message(device: &HidDevice, timeout: Duration, log: &mut PacketLog) -
         let data_end = (4 + size).min(HID_PACKET_SIZE);
         let data = &pkt[4..data_end];
         buf.extend_from_slice(data);
+
+        if buf.len() > MAX_MESSAGE_SIZE {
+            return Err(anyhow!(
+                "ASTM message exceeds {MAX_MESSAGE_SIZE} bytes — aborting"
+            ));
+        }
 
         let first = buf.first().copied().unwrap_or(0);
         let is_complete = size < MAX_PAYLOAD
@@ -426,17 +439,21 @@ fn parse_serial(raw: &str) -> String {
 /// Parse the config field (field[5]) for thresholds and units.
 /// Config looks like:  A=1^C=00^I=0200^R=0^S=01^U=0^V=20600^X=...
 fn parse_thresholds(config: &str) -> (u32, u32) {
-    let mut low = 20u32;
-    let mut high = 600u32;
+    let mut low = DEFAULT_LOW_THRESHOLD;
+    let mut high = DEFAULT_HIGH_THRESHOLD;
     let mut mmol = false;
 
     for part in config.split('^') {
         if let Some(val) = part.strip_prefix("V=") {
             // V=LLOHHH  (LL = 2-digit low, HHH = 3-digit high)
-            if val.len() >= 5 {
-                low = val[..2].parse().unwrap_or(20);
-                high = val[2..5].parse().unwrap_or(600);
-            }
+            low = val
+                .get(..2)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(DEFAULT_LOW_THRESHOLD);
+            high = val
+                .get(2..5)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(DEFAULT_HIGH_THRESHOLD);
         } else if let Some(val) = part.strip_prefix("U=") {
             mmol = val.trim() == "1";
         }
@@ -444,8 +461,8 @@ fn parse_thresholds(config: &str) -> (u32, u32) {
 
     if mmol {
         // Values were in mmol/L × 10; convert to mg/dL
-        low = ((low as f64 / 10.0) * 18.01559).round() as u32;
-        high = ((high as f64 / 10.0) * 18.01559).round() as u32;
+        low = ((low as f64 / 10.0) * MMOL_TO_MGDL).round() as u32;
+        high = ((high as f64 / 10.0) * MMOL_TO_MGDL).round() as u32;
     }
 
     (low, high)
@@ -511,7 +528,7 @@ fn parse_meal_marker(annotation: &str) -> Option<String> {
 fn parse_timestamp(s: &str) -> String {
     let digits: String = s.chars().filter(|c| c.is_ascii_digit()).take(14).collect();
     match digits.len() {
-        n if n >= 14 => format!(
+        14 => format!(
             "{}-{}-{}T{}:{}:{}",
             &digits[0..4],
             &digits[4..6],
@@ -520,7 +537,7 @@ fn parse_timestamp(s: &str) -> String {
             &digits[10..12],
             &digits[12..14]
         ),
-        n if n >= 12 => format!(
+        12 | 13 => format!(
             "{}-{}-{}T{}:{}:00",
             &digits[0..4],
             &digits[4..6],
@@ -536,29 +553,31 @@ fn parse_timestamp(s: &str) -> String {
 
 /// Parse a `--format records` text dump (one ASTM frame per line) back into
 /// structured data.  Lines that cannot be parsed are silently skipped.
+/// Thin wrapper over [`session_from_records_text`]; currently exercised only
+/// by tests, hence the dead-code allowance for non-test builds.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn parse_records_from_text(text: &str) -> (DeviceInfo, Vec<Reading>) {
-    let mut device_info = DeviceInfo::default();
+    let session = session_from_records_text(text);
+    (session.device, session.readings)
+}
+
+/// Build a Session from a saved `--format records` text dump in a single pass:
+/// every trimmed non-empty line is kept verbatim in `raw_records`, and lines
+/// that parse contribute to `device`/`readings` (unparseable lines are
+/// otherwise silently skipped).
+/// `raw_packets` is left empty — file-driven input has no HID traffic.
+pub fn session_from_records_text(text: &str) -> Session {
+    let mut device = DeviceInfo::default();
     let mut readings = Vec::new();
+    let mut raw_records = Vec::new();
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        raw_records.push(line.to_string());
         match parse_record(line) {
-            Ok(Record::Header(info)) => device_info = info,
+            Ok(Record::Header(info)) => device = info,
             Ok(Record::Result(r)) if !r.is_control => readings.push(r),
             _ => {}
         }
     }
-    (device_info, readings)
-}
-
-/// Build a Session from a saved `--format records` text dump.
-/// `raw_packets` is left empty — file-driven input has no HID traffic.
-pub fn session_from_records_text(text: &str) -> Session {
-    let (device, readings) = parse_records_from_text(text);
-    let raw_records = text
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(String::from)
-        .collect();
     Session {
         device,
         readings,
@@ -813,6 +832,15 @@ mod tests {
         let (lo, hi) = parse_thresholds("U=1^V=02033");
         assert_eq!(lo, 4);
         assert_eq!(hi, 59);
+    }
+
+    #[test]
+    fn thresholds_multibyte_utf8_does_not_panic() {
+        // Crafted device/file input with a multibyte char in the V field used to
+        // panic on a non-char-boundary byte slice.
+        let (lo, hi) = parse_thresholds("A=1^U=0^V=aé34");
+        assert_eq!(lo, 20);
+        assert_eq!(hi, 600);
     }
 
     // ── parse_meal_marker ─────────────────────────────────────────────────────

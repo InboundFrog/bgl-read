@@ -95,3 +95,7 @@ connected.
   complete history.
 - **Control solution** readings (used to verify the meter) are detected via the
   annotation field and excluded from output.
+- `--format records` output is the **raw meter transcript**: the header (`H`)
+  line includes the meter's **password** and serial number, and the dump
+  contains every reading. Redact these before sharing dumps publicly (e.g. when
+  filing issues).

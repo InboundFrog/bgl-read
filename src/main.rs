@@ -49,16 +49,12 @@ fn main() -> Result<()> {
                 "warning: --format bytes has no data when reading from a records file; output will be empty"
             );
         }
-        return output::write(&session, &cli.format, cli.output.as_deref());
+        return output::write(&session, cli.format, cli.output.as_deref());
     }
 
     let api = hidapi::HidApi::new()?;
     let device = protocol::open_device(&api)?;
-    let session = protocol::fetch_all(
-        &device,
-        cli.progress,
-        matches!(cli.format, output::Format::Bytes),
-    )?;
+    let session = protocol::fetch_all(&device, cli.progress, matches!(cli.format, Format::Bytes))?;
 
-    output::write(&session, &cli.format, cli.output.as_deref())
+    output::write(&session, cli.format, cli.output.as_deref())
 }
