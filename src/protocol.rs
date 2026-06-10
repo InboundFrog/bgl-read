@@ -318,6 +318,11 @@ fn decode_message(buf: &[u8]) -> Result<Message> {
     let msg_type = *buf.first().ok_or_else(|| anyhow!("Empty message buffer"))?;
 
     if msg_type != STX {
+        // When a session starts on the heels of a previous one, the meter
+        // packs EOT+ENQ into a single packet: it terminates the stale
+        // session and immediately offers a new one. Surface the ENQ so the
+        // handshake continues instead of treating it as end of transmission.
+        let msg_type = if buf == [EOT, ENQ] { ENQ } else { msg_type };
         return Ok(Message {
             msg_type,
             frame: String::new(),
@@ -842,6 +847,16 @@ mod tests {
     #[test]
     fn decode_empty_returns_error() {
         assert!(decode_message(&[]).is_err());
+    }
+
+    /// Observed on a real Contour Next One: a session started right after a
+    /// previous one gets EOT+ENQ in one packet — stale session terminated,
+    /// new one offered. The ENQ must win or the session ends empty.
+    #[test]
+    fn decode_eot_enq_pair_surfaces_enq() {
+        let msg = decode_message(&[EOT, ENQ]).unwrap();
+        assert_eq!(msg.msg_type, ENQ);
+        assert!(msg.frame.is_empty());
     }
 
     // ── parse_timestamp ───────────────────────────────────────────────────────
