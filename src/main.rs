@@ -54,7 +54,28 @@ fn main() -> Result<()> {
 
     let api = hidapi::HidApi::new()?;
     let device = protocol::open_device(&api)?;
-    let session = protocol::fetch_all(&device, cli.progress, matches!(cli.format, Format::Bytes))?;
+    let capture = matches!(cli.format, Format::Bytes);
+    let session = match protocol::fetch_all(&device, cli.progress, capture) {
+        Ok(session) => session,
+        Err(e) => {
+            // A failed session is exactly when a packet dump is most useful —
+            // still write whatever was captured before bailing out.
+            if !e.packets.is_empty() {
+                eprintln!(
+                    "Session failed; dumping the {} packets captured before the error",
+                    e.packets.len()
+                );
+                let partial = protocol::Session {
+                    device: protocol::DeviceInfo::default(),
+                    readings: Vec::new(),
+                    raw_records: Vec::new(),
+                    raw_packets: e.packets,
+                };
+                output::write(&partial, Format::Bytes, cli.output.as_deref())?;
+            }
+            return Err(e.error);
+        }
+    };
 
     output::write(&session, cli.format, cli.output.as_deref())
 }

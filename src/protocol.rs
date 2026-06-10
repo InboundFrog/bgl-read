@@ -58,6 +58,8 @@ const IO_RETRIES: u32 = 6;
 /// Protocol-violation retries (unexpected message type or parse failure).
 const PROTO_RETRIES: u32 = 6;
 const RECEIVE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Timeout for the meter's EOT reply during the NAK close handshake.
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 /// Hard cap on reassembled message size — real ASTM frames are well under 1 KiB.
 const MAX_MESSAGE_SIZE: usize = 64 * 1024;
 /// Default low/high glucose thresholds in mg/dL, used as fallbacks when the
@@ -316,6 +318,11 @@ fn decode_message(buf: &[u8]) -> Result<Message> {
     let msg_type = *buf.first().ok_or_else(|| anyhow!("Empty message buffer"))?;
 
     if msg_type != STX {
+        // When a session starts on the heels of a previous one, the meter
+        // packs EOT+ENQ into a single packet: it terminates the stale
+        // session and immediately offers a new one. Surface the ENQ so the
+        // handshake continues instead of treating it as end of transmission.
+        let msg_type = if buf == [EOT, ENQ] { ENQ } else { msg_type };
         return Ok(Message {
             msg_type,
             frame: String::new(),
@@ -639,15 +646,67 @@ fn get_one_record(device: &HidDevice, log: &mut PacketLog) -> Result<(Record, St
     }
 }
 
+/// A failed session, still carrying every HID packet captured before the
+/// error so callers can dump them for debugging (`--format bytes`).
+#[derive(Debug)]
+pub struct FetchError {
+    pub error: anyhow::Error,
+    pub packets: Vec<Packet>,
+}
+
+/// Terminate the session after the L record: ACK it (the meter does not
+/// reply), then send NAK and await the meter's EOT.
+///
+/// The meter does not volunteer EOT once the L record is acknowledged — the
+/// host requests it with NAK. This matches the reference JS driver, which
+/// also notes the Contour Next One must NOT be sent EOT. Without this the
+/// meter sits silent until our receive timeout, adding ~10s to every
+/// session. Best-effort: all readings are already captured at this point.
+fn close_session(device: &HidDevice, log: &mut PacketLog) {
+    if hid_write(device, &[ACK], log).is_err() {
+        return;
+    }
+    if hid_write(device, &[NAK], log).is_err() {
+        return;
+    }
+    let _ = receive_message(device, CLOSE_TIMEOUT, log);
+}
+
 /// Open a session and read all records until the L terminator or EOT.
-pub fn fetch_all(device: &HidDevice, progress: bool, capture_packets: bool) -> Result<Session> {
-    let mut packets = PacketLog::new(capture_packets);
+///
+/// On failure the captured packet log survives inside [`FetchError`] —
+/// failure modes are exactly when a `--format bytes` dump is most useful.
+pub fn fetch_all(
+    device: &HidDevice,
+    progress: bool,
+    capture_packets: bool,
+) -> Result<Session, FetchError> {
+    let mut log = PacketLog::new(capture_packets);
+    match fetch_all_inner(device, progress, &mut log) {
+        Ok((device_info, readings, raw_records)) => Ok(Session {
+            device: device_info,
+            readings,
+            raw_records,
+            raw_packets: log.packets,
+        }),
+        Err(error) => Err(FetchError {
+            error,
+            packets: log.packets,
+        }),
+    }
+}
+
+fn fetch_all_inner(
+    device: &HidDevice,
+    progress: bool,
+    packets: &mut PacketLog,
+) -> Result<(DeviceInfo, Vec<Reading>, Vec<String>)> {
     let mut raw_records: Vec<String> = Vec::new();
     let mut device_info = DeviceInfo::default();
     let mut readings: Vec<Reading> = Vec::new();
 
     loop {
-        let (record, raw) = get_one_record(device, &mut packets)?;
+        let (record, raw) = get_one_record(device, packets)?;
 
         if !raw.is_empty() {
             raw_records.push(raw);
@@ -687,11 +746,10 @@ pub fn fetch_all(device: &HidDevice, progress: bool, capture_packets: bool) -> R
             }
             Record::Skip => {}
             Record::Terminator => {
-                // Best-effort: send final ACK and wait for EOT.
-                // The L record means the device is done and all readings
-                // are already captured, so any error during this trailing
-                // handshake is not a session failure.
-                let _ = get_one_record(device, &mut packets);
+                // The L record means the device is done and all readings are
+                // already captured. Close the session; any error during this
+                // trailing handshake is not a session failure.
+                close_session(device, packets);
                 break;
             }
             Record::EndOfTransmission => break,
@@ -721,12 +779,7 @@ pub fn fetch_all(device: &HidDevice, progress: bool, capture_packets: bool) -> R
         device_info.serial_number
     );
 
-    Ok(Session {
-        device: device_info,
-        readings,
-        raw_records,
-        raw_packets: packets.packets,
-    })
+    Ok((device_info, readings, raw_records))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -794,6 +847,16 @@ mod tests {
     #[test]
     fn decode_empty_returns_error() {
         assert!(decode_message(&[]).is_err());
+    }
+
+    /// Observed on a real Contour Next One: a session started right after a
+    /// previous one gets EOT+ENQ in one packet — stale session terminated,
+    /// new one offered. The ENQ must win or the session ends empty.
+    #[test]
+    fn decode_eot_enq_pair_surfaces_enq() {
+        let msg = decode_message(&[EOT, ENQ]).unwrap();
+        assert_eq!(msg.msg_type, ENQ);
+        assert!(msg.frame.is_empty());
     }
 
     // ── parse_timestamp ───────────────────────────────────────────────────────
