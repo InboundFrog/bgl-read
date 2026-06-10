@@ -536,29 +536,31 @@ fn parse_timestamp(s: &str) -> String {
 
 /// Parse a `--format records` text dump (one ASTM frame per line) back into
 /// structured data.  Lines that cannot be parsed are silently skipped.
+/// Thin wrapper over [`session_from_records_text`]; currently exercised only
+/// by tests, hence the dead-code allowance for non-test builds.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn parse_records_from_text(text: &str) -> (DeviceInfo, Vec<Reading>) {
-    let mut device_info = DeviceInfo::default();
+    let session = session_from_records_text(text);
+    (session.device, session.readings)
+}
+
+/// Build a Session from a saved `--format records` text dump in a single pass:
+/// every trimmed non-empty line is kept verbatim in `raw_records`, and lines
+/// that parse contribute to `device`/`readings` (unparseable lines are
+/// otherwise silently skipped).
+/// `raw_packets` is left empty — file-driven input has no HID traffic.
+pub fn session_from_records_text(text: &str) -> Session {
+    let mut device = DeviceInfo::default();
     let mut readings = Vec::new();
+    let mut raw_records = Vec::new();
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        raw_records.push(line.to_string());
         match parse_record(line) {
-            Ok(Record::Header(info)) => device_info = info,
+            Ok(Record::Header(info)) => device = info,
             Ok(Record::Result(r)) if !r.is_control => readings.push(r),
             _ => {}
         }
     }
-    (device_info, readings)
-}
-
-/// Build a Session from a saved `--format records` text dump.
-/// `raw_packets` is left empty — file-driven input has no HID traffic.
-pub fn session_from_records_text(text: &str) -> Session {
-    let (device, readings) = parse_records_from_text(text);
-    let raw_records = text
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(String::from)
-        .collect();
     Session {
         device,
         readings,
