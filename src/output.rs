@@ -4,7 +4,7 @@ use clap::ValueEnum;
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
-#[derive(Debug, Clone, ValueEnum)]
+#[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum Format {
     /// Structured readings + device info as JSON
     Json,
@@ -18,7 +18,7 @@ pub enum Format {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-pub fn write(session: &Session, format: &Format, path: Option<&Path>) -> Result<()> {
+pub fn write(session: &Session, format: Format, path: Option<&Path>) -> Result<()> {
     match path {
         Some(p) => {
             let f = std::fs::File::create(p)?;
@@ -31,7 +31,7 @@ pub fn write(session: &Session, format: &Format, path: Option<&Path>) -> Result<
     }
 }
 
-fn write_to<W: Write>(session: &Session, format: &Format, mut w: W) -> Result<()> {
+fn write_to<W: Write>(session: &Session, format: Format, mut w: W) -> Result<()> {
     match format {
         Format::Json => write_json(session, &mut w),
         Format::Csv => write_csv(session, &mut w),
