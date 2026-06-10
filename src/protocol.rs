@@ -134,14 +134,13 @@ pub struct Packet {
 }
 
 /// Everything captured during a session.
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub struct Session {
     pub device: DeviceInfo,
     pub readings: Vec<Reading>,
     /// Raw ASTM record frame strings, in order received (H, P, R…, L)
     pub raw_records: Vec<String>,
     /// Every HID packet exchanged, in order
-    #[serde(skip)]
     pub raw_packets: Vec<Packet>,
 }
 
