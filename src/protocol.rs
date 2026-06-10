@@ -639,15 +639,49 @@ fn get_one_record(device: &HidDevice, log: &mut PacketLog) -> Result<(Record, St
     }
 }
 
+/// A failed session, still carrying every HID packet captured before the
+/// error so callers can dump them for debugging (`--format bytes`).
+#[derive(Debug)]
+pub struct FetchError {
+    pub error: anyhow::Error,
+    pub packets: Vec<Packet>,
+}
+
 /// Open a session and read all records until the L terminator or EOT.
-pub fn fetch_all(device: &HidDevice, progress: bool, capture_packets: bool) -> Result<Session> {
-    let mut packets = PacketLog::new(capture_packets);
+///
+/// On failure the captured packet log survives inside [`FetchError`] —
+/// failure modes are exactly when a `--format bytes` dump is most useful.
+pub fn fetch_all(
+    device: &HidDevice,
+    progress: bool,
+    capture_packets: bool,
+) -> Result<Session, FetchError> {
+    let mut log = PacketLog::new(capture_packets);
+    match fetch_all_inner(device, progress, &mut log) {
+        Ok((device_info, readings, raw_records)) => Ok(Session {
+            device: device_info,
+            readings,
+            raw_records,
+            raw_packets: log.packets,
+        }),
+        Err(error) => Err(FetchError {
+            error,
+            packets: log.packets,
+        }),
+    }
+}
+
+fn fetch_all_inner(
+    device: &HidDevice,
+    progress: bool,
+    packets: &mut PacketLog,
+) -> Result<(DeviceInfo, Vec<Reading>, Vec<String>)> {
     let mut raw_records: Vec<String> = Vec::new();
     let mut device_info = DeviceInfo::default();
     let mut readings: Vec<Reading> = Vec::new();
 
     loop {
-        let (record, raw) = get_one_record(device, &mut packets)?;
+        let (record, raw) = get_one_record(device, packets)?;
 
         if !raw.is_empty() {
             raw_records.push(raw);
@@ -691,7 +725,7 @@ pub fn fetch_all(device: &HidDevice, progress: bool, capture_packets: bool) -> R
                 // The L record means the device is done and all readings
                 // are already captured, so any error during this trailing
                 // handshake is not a session failure.
-                let _ = get_one_record(device, &mut packets);
+                let _ = get_one_record(device, packets);
                 break;
             }
             Record::EndOfTransmission => break,
@@ -721,12 +755,7 @@ pub fn fetch_all(device: &HidDevice, progress: bool, capture_packets: bool) -> R
         device_info.serial_number
     );
 
-    Ok(Session {
-        device: device_info,
-        readings,
-        raw_records,
-        raw_packets: packets.packets,
-    })
+    Ok((device_info, readings, raw_records))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
