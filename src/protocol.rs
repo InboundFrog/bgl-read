@@ -103,7 +103,7 @@ pub struct Reading {
 }
 
 /// Direction of a captured HID packet.
-#[derive(Debug, Serialize, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy)]
 pub enum Dir {
     Tx,
     Rx,
