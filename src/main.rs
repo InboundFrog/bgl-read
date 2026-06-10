@@ -44,6 +44,11 @@ fn main() -> Result<()> {
     if let Some(path) = cli.from_records.as_deref() {
         let text = std::fs::read_to_string(path)?;
         let session = protocol::session_from_records_text(&text);
+        if matches!(cli.format, Format::Bytes) {
+            eprintln!(
+                "warning: --format bytes has no data when reading from a records file; output will be empty"
+            );
+        }
         return output::write(&session, &cli.format, cli.output.as_deref());
     }
 
