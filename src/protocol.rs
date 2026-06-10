@@ -58,6 +58,8 @@ const IO_RETRIES: u32 = 6;
 /// Protocol-violation retries (unexpected message type or parse failure).
 const PROTO_RETRIES: u32 = 6;
 const RECEIVE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Hard cap on reassembled message size — real ASTM frames are well under 1 KiB.
+const MAX_MESSAGE_SIZE: usize = 64 * 1024;
 
 // ── Public data types ─────────────────────────────────────────────────────────
 
@@ -279,6 +281,12 @@ fn receive_message(device: &HidDevice, timeout: Duration, log: &mut PacketLog) -
         let data_end = (4 + size).min(HID_PACKET_SIZE);
         let data = &pkt[4..data_end];
         buf.extend_from_slice(data);
+
+        if buf.len() > MAX_MESSAGE_SIZE {
+            return Err(anyhow!(
+                "ASTM message exceeds {MAX_MESSAGE_SIZE} bytes — aborting"
+            ));
+        }
 
         let first = buf.first().copied().unwrap_or(0);
         let is_complete = size < MAX_PAYLOAD
