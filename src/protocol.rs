@@ -58,6 +58,10 @@ const IO_RETRIES: u32 = 6;
 /// Protocol-violation retries (unexpected message type or parse failure).
 const PROTO_RETRIES: u32 = 6;
 const RECEIVE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Default low/high glucose thresholds in mg/dL, used as fallbacks when the
+/// header config field is absent or unparseable.
+const DEFAULT_LOW_THRESHOLD: u32 = 20;
+const DEFAULT_HIGH_THRESHOLD: u32 = 600;
 
 // ── Public data types ─────────────────────────────────────────────────────────
 
@@ -79,8 +83,8 @@ impl Default for DeviceInfo {
             serial_number: "Unknown".into(),
             record_count: 0,
             device_time: String::new(),
-            low_threshold: 20,
-            high_threshold: 600,
+            low_threshold: DEFAULT_LOW_THRESHOLD,
+            high_threshold: DEFAULT_HIGH_THRESHOLD,
         }
     }
 }
@@ -426,16 +430,16 @@ fn parse_serial(raw: &str) -> String {
 /// Parse the config field (field[5]) for thresholds and units.
 /// Config looks like:  A=1^C=00^I=0200^R=0^S=01^U=0^V=20600^X=...
 fn parse_thresholds(config: &str) -> (u32, u32) {
-    let mut low = 20u32;
-    let mut high = 600u32;
+    let mut low = DEFAULT_LOW_THRESHOLD;
+    let mut high = DEFAULT_HIGH_THRESHOLD;
     let mut mmol = false;
 
     for part in config.split('^') {
         if let Some(val) = part.strip_prefix("V=") {
             // V=LLOHHH  (LL = 2-digit low, HHH = 3-digit high)
             if val.len() >= 5 {
-                low = val[..2].parse().unwrap_or(20);
-                high = val[2..5].parse().unwrap_or(600);
+                low = val[..2].parse().unwrap_or(DEFAULT_LOW_THRESHOLD);
+                high = val[2..5].parse().unwrap_or(DEFAULT_HIGH_THRESHOLD);
             }
         } else if let Some(val) = part.strip_prefix("U=") {
             mmol = val.trim() == "1";
