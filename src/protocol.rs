@@ -60,6 +60,12 @@ const PROTO_RETRIES: u32 = 6;
 const RECEIVE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Hard cap on reassembled message size — real ASTM frames are well under 1 KiB.
 const MAX_MESSAGE_SIZE: usize = 64 * 1024;
+/// Default low/high glucose thresholds in mg/dL, used as fallbacks when the
+/// header config field is absent or unparseable.
+const DEFAULT_LOW_THRESHOLD: u32 = 20;
+const DEFAULT_HIGH_THRESHOLD: u32 = 600;
+/// mmol/L → mg/dL conversion factor for glucose.
+const MMOL_TO_MGDL: f64 = 18.01559;
 
 // ── Public data types ─────────────────────────────────────────────────────────
 
@@ -81,8 +87,8 @@ impl Default for DeviceInfo {
             serial_number: "Unknown".into(),
             record_count: 0,
             device_time: String::new(),
-            low_threshold: 20,
-            high_threshold: 600,
+            low_threshold: DEFAULT_LOW_THRESHOLD,
+            high_threshold: DEFAULT_HIGH_THRESHOLD,
         }
     }
 }
@@ -434,17 +440,21 @@ fn parse_serial(raw: &str) -> String {
 /// Parse the config field (field[5]) for thresholds and units.
 /// Config looks like:  A=1^C=00^I=0200^R=0^S=01^U=0^V=20600^X=...
 fn parse_thresholds(config: &str) -> (u32, u32) {
-    let mut low = 20u32;
-    let mut high = 600u32;
+    let mut low = DEFAULT_LOW_THRESHOLD;
+    let mut high = DEFAULT_HIGH_THRESHOLD;
     let mut mmol = false;
 
     for part in config.split('^') {
         if let Some(val) = part.strip_prefix("V=") {
             // V=LLOHHH  (LL = 2-digit low, HHH = 3-digit high)
-            if val.len() >= 5 {
-                low = val[..2].parse().unwrap_or(20);
-                high = val[2..5].parse().unwrap_or(600);
-            }
+            low = val
+                .get(..2)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(DEFAULT_LOW_THRESHOLD);
+            high = val
+                .get(2..5)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(DEFAULT_HIGH_THRESHOLD);
         } else if let Some(val) = part.strip_prefix("U=") {
             mmol = val.trim() == "1";
         }
@@ -452,8 +462,8 @@ fn parse_thresholds(config: &str) -> (u32, u32) {
 
     if mmol {
         // Values were in mmol/L × 10; convert to mg/dL
-        low = ((low as f64 / 10.0) * 18.01559).round() as u32;
-        high = ((high as f64 / 10.0) * 18.01559).round() as u32;
+        low = ((low as f64 / 10.0) * MMOL_TO_MGDL).round() as u32;
+        high = ((high as f64 / 10.0) * MMOL_TO_MGDL).round() as u32;
     }
 
     (low, high)
@@ -821,6 +831,15 @@ mod tests {
         let (lo, hi) = parse_thresholds("U=1^V=02033");
         assert_eq!(lo, 4);
         assert_eq!(hi, 59);
+    }
+
+    #[test]
+    fn thresholds_multibyte_utf8_does_not_panic() {
+        // Crafted device/file input with a multibyte char in the V field used to
+        // panic on a non-char-boundary byte slice.
+        let (lo, hi) = parse_thresholds("A=1^U=0^V=aé34");
+        assert_eq!(lo, 20);
+        assert_eq!(hi, 600);
     }
 
     // ── parse_meal_marker ─────────────────────────────────────────────────────
