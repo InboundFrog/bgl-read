@@ -103,35 +103,23 @@ fn write_bytes<W: Write>(session: &Session, w: &mut W) -> Result<()> {
 
 /// Classic 16-bytes-per-row hex dump with ASCII sidebar.
 fn hex_dump<W: Write>(data: &[u8], w: &mut W) -> Result<()> {
+    use std::fmt::Write as _;
+
     for (row, chunk) in data.chunks(16).enumerate() {
-        // Offset
-        write!(w, "{:04x}  ", row * 16)?;
-        // Hex bytes
-        for (i, b) in chunk.iter().enumerate() {
+        let mut hex = String::new();
+        let mut ascii = String::new();
+        for (i, &b) in chunk.iter().enumerate() {
             if i == 8 {
-                write!(w, " ")?;
+                hex.push(' ');
             }
-            write!(w, "{b:02x} ")?;
-        }
-        // Padding if last row is short
-        let pad = 16 - chunk.len();
-        for i in 0..pad {
-            if chunk.len() + i == 8 {
-                write!(w, " ")?;
-            }
-            write!(w, "   ")?;
-        }
-        // ASCII sidebar
-        write!(w, " |")?;
-        for &b in chunk {
-            let c = if b.is_ascii_graphic() || b == b' ' {
+            write!(hex, "{b:02x} ")?;
+            ascii.push(if b.is_ascii_graphic() || b == b' ' {
                 b as char
             } else {
                 '.'
-            };
-            write!(w, "{c}")?;
+            });
         }
-        writeln!(w, "|")?;
+        writeln!(w, "{:04x}  {hex:<49} |{ascii}|", row * 16)?;
     }
     Ok(())
 }
