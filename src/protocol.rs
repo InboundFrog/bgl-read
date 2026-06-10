@@ -58,6 +58,8 @@ const IO_RETRIES: u32 = 6;
 /// Protocol-violation retries (unexpected message type or parse failure).
 const PROTO_RETRIES: u32 = 6;
 const RECEIVE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Timeout for the meter's EOT reply during the NAK close handshake.
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 /// Hard cap on reassembled message size — real ASTM frames are well under 1 KiB.
 const MAX_MESSAGE_SIZE: usize = 64 * 1024;
 /// Default low/high glucose thresholds in mg/dL, used as fallbacks when the
@@ -647,6 +649,24 @@ pub struct FetchError {
     pub packets: Vec<Packet>,
 }
 
+/// Terminate the session after the L record: ACK it (the meter does not
+/// reply), then send NAK and await the meter's EOT.
+///
+/// The meter does not volunteer EOT once the L record is acknowledged — the
+/// host requests it with NAK. This matches the reference JS driver, which
+/// also notes the Contour Next One must NOT be sent EOT. Without this the
+/// meter sits silent until our receive timeout, adding ~10s to every
+/// session. Best-effort: all readings are already captured at this point.
+fn close_session(device: &HidDevice, log: &mut PacketLog) {
+    if hid_write(device, &[ACK], log).is_err() {
+        return;
+    }
+    if hid_write(device, &[NAK], log).is_err() {
+        return;
+    }
+    let _ = receive_message(device, CLOSE_TIMEOUT, log);
+}
+
 /// Open a session and read all records until the L terminator or EOT.
 ///
 /// On failure the captured packet log survives inside [`FetchError`] —
@@ -721,11 +741,10 @@ fn fetch_all_inner(
             }
             Record::Skip => {}
             Record::Terminator => {
-                // Best-effort: send final ACK and wait for EOT.
-                // The L record means the device is done and all readings
-                // are already captured, so any error during this trailing
-                // handshake is not a session failure.
-                let _ = get_one_record(device, packets);
+                // The L record means the device is done and all readings are
+                // already captured. Close the session; any error during this
+                // trailing handshake is not a session failure.
+                close_session(device, packets);
                 break;
             }
             Record::EndOfTransmission => break,
