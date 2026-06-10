@@ -217,12 +217,12 @@ impl PacketLog {
 
 fn hid_write(device: &HidDevice, data: &[u8], log: &mut PacketLog) -> Result<()> {
     let pkt = build_write_packet(data);
-    let mut tx_data = [0u8; HID_PACKET_SIZE];
-    tx_data.copy_from_slice(&pkt[1..]);
+    // Log without the report-ID byte
+    let tx_data: [u8; HID_PACKET_SIZE] = pkt[1..].try_into().expect("pkt is 65 bytes");
     log.push(Packet {
         dir: Dir::Tx,
         data: tx_data,
-    }); // log without report-ID
+    });
     device.write(&pkt)?;
     Ok(())
 }
