@@ -44,16 +44,12 @@ fn main() -> Result<()> {
     if let Some(path) = cli.from_records.as_deref() {
         let text = std::fs::read_to_string(path)?;
         let session = protocol::session_from_records_text(&text);
-        return output::write(&session, &cli.format, cli.output.as_deref());
+        return output::write(&session, cli.format, cli.output.as_deref());
     }
 
     let api = hidapi::HidApi::new()?;
     let device = protocol::open_device(&api)?;
-    let session = protocol::fetch_all(
-        &device,
-        cli.progress,
-        matches!(cli.format, output::Format::Bytes),
-    )?;
+    let session = protocol::fetch_all(&device, cli.progress, matches!(cli.format, Format::Bytes))?;
 
-    output::write(&session, &cli.format, cli.output.as_deref())
+    output::write(&session, cli.format, cli.output.as_deref())
 }
