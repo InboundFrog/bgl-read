@@ -528,7 +528,7 @@ fn parse_meal_marker(annotation: &str) -> Option<String> {
 fn parse_timestamp(s: &str) -> String {
     let digits: String = s.chars().filter(|c| c.is_ascii_digit()).take(14).collect();
     match digits.len() {
-        n if n >= 14 => format!(
+        14 => format!(
             "{}-{}-{}T{}:{}:{}",
             &digits[0..4],
             &digits[4..6],
@@ -537,7 +537,7 @@ fn parse_timestamp(s: &str) -> String {
             &digits[10..12],
             &digits[12..14]
         ),
-        n if n >= 12 => format!(
+        12 | 13 => format!(
             "{}-{}-{}T{}:{}:00",
             &digits[0..4],
             &digits[4..6],
