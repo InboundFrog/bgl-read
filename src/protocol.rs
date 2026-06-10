@@ -62,6 +62,8 @@ const RECEIVE_TIMEOUT: Duration = Duration::from_secs(10);
 /// header config field is absent or unparseable.
 const DEFAULT_LOW_THRESHOLD: u32 = 20;
 const DEFAULT_HIGH_THRESHOLD: u32 = 600;
+/// mmol/L → mg/dL conversion factor for glucose.
+const MMOL_TO_MGDL: f64 = 18.01559;
 
 // ── Public data types ─────────────────────────────────────────────────────────
 
@@ -448,8 +450,8 @@ fn parse_thresholds(config: &str) -> (u32, u32) {
 
     if mmol {
         // Values were in mmol/L × 10; convert to mg/dL
-        low = ((low as f64 / 10.0) * 18.01559).round() as u32;
-        high = ((high as f64 / 10.0) * 18.01559).round() as u32;
+        low = ((low as f64 / 10.0) * MMOL_TO_MGDL).round() as u32;
+        high = ((high as f64 / 10.0) * MMOL_TO_MGDL).round() as u32;
     }
 
     (low, high)
