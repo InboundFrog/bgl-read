@@ -439,10 +439,14 @@ fn parse_thresholds(config: &str) -> (u32, u32) {
     for part in config.split('^') {
         if let Some(val) = part.strip_prefix("V=") {
             // V=LLOHHH  (LL = 2-digit low, HHH = 3-digit high)
-            if val.len() >= 5 {
-                low = val[..2].parse().unwrap_or(DEFAULT_LOW_THRESHOLD);
-                high = val[2..5].parse().unwrap_or(DEFAULT_HIGH_THRESHOLD);
-            }
+            low = val
+                .get(..2)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(DEFAULT_LOW_THRESHOLD);
+            high = val
+                .get(2..5)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(DEFAULT_HIGH_THRESHOLD);
         } else if let Some(val) = part.strip_prefix("U=") {
             mmol = val.trim() == "1";
         }
@@ -819,6 +823,15 @@ mod tests {
         let (lo, hi) = parse_thresholds("U=1^V=02033");
         assert_eq!(lo, 4);
         assert_eq!(hi, 59);
+    }
+
+    #[test]
+    fn thresholds_multibyte_utf8_does_not_panic() {
+        // Crafted device/file input with a multibyte char in the V field used to
+        // panic on a non-char-boundary byte slice.
+        let (lo, hi) = parse_thresholds("A=1^U=0^V=aé34");
+        assert_eq!(lo, 20);
+        assert_eq!(hi, 600);
     }
 
     // ── parse_meal_marker ─────────────────────────────────────────────────────
