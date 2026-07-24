@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+
+# Fail immediately on error
+# Add 'x' to the options if you want debug output
+set -euo pipefail
+
+# Don't touch these
+BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+PRJ_DIR="$(cd "${BIN_DIR}/../" > /dev/null 2>&1 && pwd)"
+CAP_DIR="${PRJ_DIR}/captures"
+DATE_CAP=$(date "+%Y%m%d")
+PREFIX="${1:-unknown}"
+
+echo_err() {
+  echo "$1" >&2
+}
+
+# Ensure the captures directory exists
+mkdir -p "${CAP_DIR}/${DATE_CAP}"
+
+cargo run -- --format csv --progress --output "${CAP_DIR}/${DATE_CAP}/${PREFIX}-bgl.csv"
+cargo run -- --format json --progress --output "${CAP_DIR}/${DATE_CAP}/${PREFIX}-bgl.json"
+cargo run -- --format records --progress --output "${CAP_DIR}/${DATE_CAP}/${PREFIX}-bgl.txt"
+cargo run -- --format bytes --progress --output "${CAP_DIR}/${DATE_CAP}/${PREFIX}-bgl.hex"
