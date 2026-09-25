@@ -54,9 +54,45 @@ bgl-read --format csv --output readings.csv
 
 # List connected Contour devices
 bgl-read --list
+
+# Capture the raw packet stream, then convert it without the meter
+bgl-read --format binary --progress --output session.bin
+bgl-read --from-bytes session.bin --format csv --output readings.csv
 ```
 
+### Reading the meter only once
+
+Every run that talks to the meter is a full transfer of up to 800 records, so
+producing four formats used to mean four transfers. `--format binary` writes
+the raw HID packet stream to a file, and `--from-bytes` replays that file
+through the same framing and parsing code the live read uses — so a single
+transfer can produce every format, the `bytes` hex dump included.
+
+```sh
+bgl-read --format binary --progress --output session.bin
+bgl-read --from-bytes session.bin --format records --output session.txt
+bgl-read --from-bytes session.bin --format csv     --output session.csv
+bgl-read --from-bytes session.bin --format json    --output session.json
+bgl-read --from-bytes session.bin --format bytes   --output session.hex
+```
+
+`bin/capture-bgl <prefix>` does exactly this and leaves the files in
+`captures/<date>/`.
+
+`--from-records FILE` is the narrower version: it re-parses a saved `records`
+dump, which is enough for `csv` and `json` but cannot reproduce `bytes` or
+`binary`, because the text dump does not carry the HID traffic. Both replay
+flags are offline-only, so neither accepts `--progress`.
+
+Damaged input is reported rather than quietly producing a short reading list:
+`--from-bytes` rejects a truncated or foreign file outright, and
+`--from-records` warns on stderr with a count of the lines it could not parse.
+
 ### Output formats
+
+Formats are chosen with `--format`, and `--output FILE` writes to a file
+instead of stdout. `binary` refuses to write to a terminal — give it `--output`
+or pipe it somewhere.
 
 | `--format` | Description                                                            |
 |------------|------------------------------------------------------------------------|
@@ -64,6 +100,7 @@ bgl-read --list
 | `csv`      | One reading per row, header included                                   |
 | `records`  | Raw ASTM record text as received from the meter (useful for debugging) |
 | `bytes`    | Hex dump of every HID packet exchanged (TX and RX)                     |
+| `binary`   | Compact binary packet capture, replayable with `--from-bytes`          |
 
 Timestamps are in the meter's own local time (no timezone attached — the device
 has no concept of timezone).
@@ -97,5 +134,6 @@ connected.
   annotation field and excluded from output.
 - `--format records` output is the **raw meter transcript**: the header (`H`)
   line includes the meter's **password** and serial number, and the dump
-  contains every reading. Redact these before sharing dumps publicly (e.g. when
+  contains every reading. The `bytes` and `binary` captures hold that same
+  transcript verbatim. Redact these before sharing dumps publicly (e.g. when
   filing issues).

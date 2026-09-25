@@ -14,6 +14,8 @@ pub enum Format {
     Records,
     /// Hex dump of every HID packet sent and received
     Bytes,
+    /// Raw HID packet capture, replayable offline with `--from-bytes`
+    Binary,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -37,6 +39,7 @@ fn write_to<W: Write>(session: &Session, format: Format, mut w: W) -> Result<()>
         Format::Csv => write_csv(session, &mut w),
         Format::Records => write_records(session, &mut w),
         Format::Bytes => write_bytes(session, &mut w),
+        Format::Binary => write_binary(session, &mut w),
     }
 }
 
@@ -88,6 +91,13 @@ fn write_records<W: Write>(session: &Session, w: &mut W) -> Result<()> {
     for record in &session.raw_records {
         writeln!(w, "{record}")?;
     }
+    Ok(())
+}
+
+// ── Binary packet capture ─────────────────────────────────────────────────────
+
+fn write_binary<W: Write>(session: &Session, w: &mut W) -> Result<()> {
+    w.write_all(&crate::protocol::encode_packets(&session.raw_packets))?;
     Ok(())
 }
 

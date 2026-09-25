@@ -10,16 +10,25 @@ PRJ_DIR="$(cd "${BIN_DIR}/../" > /dev/null 2>&1 && pwd)"
 CAP_DIR="${PRJ_DIR}/captures"
 DATE_CAP=$(date "+%Y%m%d")
 PREFIX="${1:-unknown}"
+OUT_DIR="${CAP_DIR}/${DATE_CAP}"
 
 # Ensure the captures directory exists
-mkdir -p "${CAP_DIR}/${DATE_CAP}"
+mkdir -p "${OUT_DIR}"
 
-# Read records first, to reduce device calls
-cargo run -- --format records --progress --output "${CAP_DIR}/${DATE_CAP}/${PREFIX}-bgl.txt"
-# Generate CSV and JSON from the records capture
-cargo run -- --from-records "${CAP_DIR}/${DATE_CAP}/${PREFIX}-bgl.txt" --format csv --output "${CAP_DIR}/${DATE_CAP}/${PREFIX}-bgl.csv"
-cargo run -- --from-records "${CAP_DIR}/${DATE_CAP}/${PREFIX}-bgl.txt" --format json --output "${CAP_DIR}/${DATE_CAP}/${PREFIX}-bgl.json"
-# Finally, re-capture to get the bytes
-# TODO: Need to fix this so that a proper binary is generated and that can generate
-#       the records file, which can in turn generate the other formats?
-cargo run -- --format bytes --progress --output "${CAP_DIR}/${DATE_CAP}/${PREFIX}-bgl.hex"
+# Stage the run in a sibling directory on the same filesystem, so publishing it
+# at the end is a rename. A failure part-way through then leaves the previous
+# capture untouched instead of mixing fresh files with stale ones.
+WORK_DIR="$(mktemp -d "${OUT_DIR}/.${PREFIX}-XXXXXX")"
+trap 'rm -rf "${WORK_DIR}"' EXIT
+STEM="${WORK_DIR}/${PREFIX}-bgl"
+
+# The only time we touch the meter: capture the raw HID packet stream once.
+cargo run -- --format binary --progress --output "${STEM}.bin"
+
+# Every other format is replayed from that capture, offline.
+cargo run -- --from-bytes "${STEM}.bin" --format records --output "${STEM}.txt"
+cargo run -- --from-bytes "${STEM}.bin" --format csv     --output "${STEM}.csv"
+cargo run -- --from-bytes "${STEM}.bin" --format json    --output "${STEM}.json"
+cargo run -- --from-bytes "${STEM}.bin" --format bytes   --output "${STEM}.hex"
+
+mv "${WORK_DIR}"/* "${OUT_DIR}/"
