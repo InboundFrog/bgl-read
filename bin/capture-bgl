@@ -18,7 +18,12 @@ echo_err() {
 # Ensure the captures directory exists
 mkdir -p "${CAP_DIR}/${DATE_CAP}"
 
-cargo run -- --format csv --progress --output "${CAP_DIR}/${DATE_CAP}/${PREFIX}-bgl.csv"
-cargo run -- --format json --progress --output "${CAP_DIR}/${DATE_CAP}/${PREFIX}-bgl.json"
+# Read records first, to reduce device calls
 cargo run -- --format records --progress --output "${CAP_DIR}/${DATE_CAP}/${PREFIX}-bgl.txt"
+# Generate CSV and JSON from the records capture
+cargo run -- --from-records "${CAP_DIR}/${DATE_CAP}/${PREFIX}-bgl.txt" --format csv --output "${CAP_DIR}/${DATE_CAP}/${PREFIX}-bgl.csv"
+cargo run -- --from-records "${CAP_DIR}/${DATE_CAP}/${PREFIX}-bgl.txt" --format json --output "${CAP_DIR}/${DATE_CAP}/${PREFIX}-bgl.json"
+# Finally, re-capture to get the bytes
+# TODO: Need to fix this so that a proper binary is generated and that can generate
+#       the records file, which can in turn generate the other formats?
 cargo run -- --format bytes --progress --output "${CAP_DIR}/${DATE_CAP}/${PREFIX}-bgl.hex"
