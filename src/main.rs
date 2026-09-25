@@ -4,6 +4,7 @@ mod protocol;
 use anyhow::Result;
 use clap::Parser;
 use output::Format;
+use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -30,6 +31,11 @@ struct Cli {
     /// Parse a saved `--format records` file instead of reading from a meter
     #[arg(long, value_name = "FILE", conflicts_with_all = ["list", "progress"])]
     from_records: Option<PathBuf>,
+
+    /// Replay a saved `--format binary` capture instead of reading from a meter.
+    /// Unlike --from-records this reproduces every format, bytes included.
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["list", "progress", "from_records"])]
+    from_bytes: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -41,12 +47,29 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Binary captures are unreadable noise on a terminal, but piping them
+    // onward (e.g. into xxd) is legitimate — only block the former.
+    if matches!(cli.format, Format::Binary) && cli.output.is_none() && io::stdout().is_terminal() {
+        anyhow::bail!("--format binary writes raw bytes; use --output FILE or pipe it somewhere");
+    }
+
+    if let Some(path) = cli.from_bytes.as_deref() {
+        let packets = protocol::decode_packets(&std::fs::read(path)?)?;
+        let session = protocol::session_from_packets(packets)?;
+        return output::write(&session, cli.format, cli.output.as_deref());
+    }
+
     if let Some(path) = cli.from_records.as_deref() {
         let text = std::fs::read_to_string(path)?;
         let session = protocol::session_from_records_text(&text);
-        if matches!(cli.format, Format::Bytes) {
+        if matches!(cli.format, Format::Bytes | Format::Binary) {
             eprintln!(
-                "warning: --format bytes has no data when reading from a records file; output will be empty"
+                "warning: --format {} has no data when reading from a records file; output will be empty",
+                if matches!(cli.format, Format::Bytes) {
+                    "bytes"
+                } else {
+                    "binary"
+                }
             );
         }
         return output::write(&session, cli.format, cli.output.as_deref());
@@ -54,7 +77,7 @@ fn main() -> Result<()> {
 
     let api = hidapi::HidApi::new()?;
     let device = protocol::open_device(&api)?;
-    let capture = matches!(cli.format, Format::Bytes);
+    let capture = matches!(cli.format, Format::Bytes | Format::Binary);
     let session = match protocol::fetch_all(&device, cli.progress, capture) {
         Ok(session) => session,
         Err(e) => {
@@ -71,7 +94,13 @@ fn main() -> Result<()> {
                     raw_records: Vec::new(),
                     raw_packets: e.packets,
                 };
-                output::write(&partial, Format::Bytes, cli.output.as_deref())?;
+                // Dump in whichever capture format was asked for, so a
+                // `--format binary` failure still leaves a replayable file.
+                let dump = match cli.format {
+                    Format::Binary => Format::Binary,
+                    _ => Format::Bytes,
+                };
+                output::write(&partial, dump, cli.output.as_deref())?;
             }
             return Err(e.error);
         }

@@ -279,33 +279,56 @@ struct Message {
 ///     which puts ETX/ETB at data[SIZE-5] (= pkt[SIZE-1] from start of packet)
 fn receive_message(device: &HidDevice, timeout: Duration, log: &mut PacketLog) -> Result<Message> {
     let deadline = Instant::now() + timeout;
-    let mut buf: Vec<u8> = Vec::new();
+    let mut asm = MessageAssembler::new();
 
     loop {
         let pkt = hid_read(device, deadline, log)?;
-
-        let size = pkt[3] as usize;
-        let data_end = (4 + size).min(HID_PACKET_SIZE);
-        let data = &pkt[4..data_end];
-        buf.extend_from_slice(data);
-
-        if buf.len() > MAX_MESSAGE_SIZE {
-            return Err(anyhow!(
-                "ASTM message exceeds {MAX_MESSAGE_SIZE} bytes — aborting"
-            ));
-        }
-
-        let first = buf.first().copied().unwrap_or(0);
-        let is_complete = size < MAX_PAYLOAD
-            || matches!(first, ENQ | EOT | ACK | NAK)
-            || (buf.len() >= 5 && matches!(buf[buf.len() - 5], ETX | ETB));
-
-        if is_complete {
-            break;
+        if let Some(msg) = asm.push(&pkt) {
+            return msg;
         }
     }
+}
 
-    decode_message(&buf)
+/// Reassembles ASTM messages from a stream of 64-byte HID packets.
+///
+/// Held separate from the device so `--from-bytes` replays a capture through
+/// exactly the framing rules it was read with — one decoder, not two.
+struct MessageAssembler {
+    buf: Vec<u8>,
+}
+
+impl MessageAssembler {
+    fn new() -> Self {
+        Self { buf: Vec::new() }
+    }
+
+    /// Feed one packet. Returns `Some` once the accumulated bytes form a
+    /// complete message, resetting for the next one.
+    fn push(&mut self, pkt: &[u8; HID_PACKET_SIZE]) -> Option<Result<Message>> {
+        let size = pkt[3] as usize;
+        let data_end = (4 + size).min(HID_PACKET_SIZE);
+        self.buf.extend_from_slice(&pkt[4..data_end]);
+
+        if self.buf.len() > MAX_MESSAGE_SIZE {
+            self.buf.clear();
+            return Some(Err(anyhow!(
+                "ASTM message exceeds {MAX_MESSAGE_SIZE} bytes — aborting"
+            )));
+        }
+
+        let first = self.buf.first().copied().unwrap_or(0);
+        let is_complete = size < MAX_PAYLOAD
+            || matches!(first, ENQ | EOT | ACK | NAK)
+            || (self.buf.len() >= 5 && matches!(self.buf[self.buf.len() - 5], ETX | ETB));
+
+        if !is_complete {
+            return None;
+        }
+
+        let msg = decode_message(&self.buf);
+        self.buf.clear();
+        Some(msg)
+    }
 }
 
 fn compute_checksum(data: &[u8]) -> String {
@@ -556,6 +579,129 @@ fn parse_timestamp(s: &str) -> String {
     }
 }
 
+// ── Binary packet capture ─────────────────────────────────────────────────────
+
+/// File magic for `--format binary` captures.
+const CAPTURE_MAGIC: &[u8; 7] = b"BGLCAP\0";
+/// Bumped whenever the on-disk layout changes incompatibly.
+const CAPTURE_VERSION: u8 = 1;
+/// magic + version + packet size.
+const CAPTURE_HEADER_LEN: usize = CAPTURE_MAGIC.len() + 2;
+
+/// Serialise a packet log: a 9-byte header, then one direction byte plus the
+/// raw packet per entry. The stride is fixed and recorded in the header, so a
+/// truncated file is detectable rather than silently short.
+pub fn encode_packets(packets: &[Packet]) -> Vec<u8> {
+    let stride = 1 + HID_PACKET_SIZE;
+    let mut out = Vec::with_capacity(CAPTURE_HEADER_LEN + packets.len() * stride);
+    out.extend_from_slice(CAPTURE_MAGIC);
+    out.push(CAPTURE_VERSION);
+    out.push(HID_PACKET_SIZE as u8);
+    for p in packets {
+        out.push(match p.dir {
+            Dir::Tx => 0,
+            Dir::Rx => 1,
+        });
+        out.extend_from_slice(&p.data);
+    }
+    out
+}
+
+/// Inverse of [`encode_packets`]. Rejects anything it cannot read exactly —
+/// a half-decoded capture would produce a plausible-looking short reading list.
+pub fn decode_packets(bytes: &[u8]) -> Result<Vec<Packet>> {
+    let header = bytes
+        .get(..CAPTURE_HEADER_LEN)
+        .ok_or_else(|| anyhow!("Not a bgl-read capture: file is shorter than its header"))?;
+
+    if &header[..CAPTURE_MAGIC.len()] != CAPTURE_MAGIC {
+        return Err(anyhow!(
+            "Not a bgl-read capture: bad magic (is this a --format bytes hex dump?)"
+        ));
+    }
+
+    let version = header[CAPTURE_MAGIC.len()];
+    if version != CAPTURE_VERSION {
+        return Err(anyhow!(
+            "Capture is version {version}; this build reads version {CAPTURE_VERSION}"
+        ));
+    }
+
+    let packet_size = header[CAPTURE_MAGIC.len() + 1] as usize;
+    if packet_size != HID_PACKET_SIZE {
+        return Err(anyhow!(
+            "Capture holds {packet_size}-byte packets; this build expects {HID_PACKET_SIZE}"
+        ));
+    }
+
+    let body = &bytes[CAPTURE_HEADER_LEN..];
+    let stride = 1 + HID_PACKET_SIZE;
+    let trailing = body.len() % stride;
+    if trailing != 0 {
+        return Err(anyhow!(
+            "Capture is truncated: {trailing} trailing byte(s) after the last whole packet"
+        ));
+    }
+
+    body.chunks_exact(stride)
+        .map(|chunk| {
+            let dir = match chunk[0] {
+                0 => Dir::Tx,
+                1 => Dir::Rx,
+                other => return Err(anyhow!("Bad direction byte {other:#04x} in capture")),
+            };
+            Ok(Packet {
+                dir,
+                data: chunk[1..].try_into().expect("chunk is one stride long"),
+            })
+        })
+        .collect()
+}
+
+/// Rebuild a Session by replaying captured HID packets through the same
+/// framing and record parsing the live read uses.
+///
+/// Only RX packets carry meter data — TX entries are our own ACK/NAK traffic.
+/// Messages that fail to decode are skipped: in the live session those were
+/// NAK'd and retried, so the retry's good copy appears later in the stream.
+pub fn session_from_packets(packets: Vec<Packet>) -> Result<Session> {
+    let mut asm = MessageAssembler::new();
+    let mut builder = SessionBuilder::new(false);
+
+    for pkt in packets.iter().filter(|p| matches!(p.dir, Dir::Rx)) {
+        let Some(Ok(msg)) = asm.push(&pkt.data) else {
+            continue;
+        };
+
+        let (record, raw) = match msg.msg_type {
+            STX => match parse_record(&msg.frame) {
+                Ok(record) => (record, msg.frame),
+                // Superseded by the retry the meter sent after our NAK.
+                Err(_) => continue,
+            },
+            EOT => (Record::EndOfTransmission, String::new()),
+            // ENQ / ACK / NAK carry no record payload.
+            _ => continue,
+        };
+
+        if !matches!(builder.push(record, raw), Flow::Continue) {
+            break;
+        }
+    }
+
+    let (device, readings, raw_records) = builder.finish(
+        "Capture contains no records — it may be truncated, or from a session that failed \
+         before the meter sent anything.",
+    )?;
+
+    Ok(Session {
+        device,
+        readings,
+        raw_records,
+        raw_packets: packets,
+    })
+}
+
 // ── Text-format round-trip ────────────────────────────────────────────────────
 
 /// Parse a `--format records` text dump (one ASTM frame per line) back into
@@ -570,20 +716,36 @@ pub fn parse_records_from_text(text: &str) -> (DeviceInfo, Vec<Reading>) {
 
 /// Build a Session from a saved `--format records` text dump in a single pass:
 /// every trimmed non-empty line is kept verbatim in `raw_records`, and lines
-/// that parse contribute to `device`/`readings` (unparseable lines are
-/// otherwise silently skipped).
+/// that parse contribute to `device`/`readings`.
+///
+/// Lines that fail to parse are skipped but counted, and the count is warned
+/// about on stderr — a truncated or mangled dump would otherwise yield a
+/// quietly short CSV that looks perfectly valid.
 /// `raw_packets` is left empty — file-driven input has no HID traffic.
 pub fn session_from_records_text(text: &str) -> Session {
     let mut device = DeviceInfo::default();
     let mut readings = Vec::new();
     let mut raw_records = Vec::new();
+    let mut unparsed = 0usize;
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
         raw_records.push(line.to_string());
         match parse_record(line) {
             Ok(Record::Header(info)) => device = info,
             Ok(Record::Result(r)) if !r.is_control => readings.push(r),
-            _ => {}
+            // Control readings and the P/C/O/M/Q/S/L record types are
+            // recognised and deliberately carry nothing into the output.
+            Ok(_) => {}
+            Err(e) => {
+                unparsed += 1;
+                eprintln!("warning: skipping unparseable record line: {e}");
+            }
         }
+    }
+    if unparsed > 0 {
+        eprintln!(
+            "warning: {unparsed} of {} line(s) could not be parsed; output may be incomplete",
+            raw_records.len()
+        );
     }
     Session {
         device,
@@ -701,85 +863,133 @@ fn fetch_all_inner(
     progress: bool,
     packets: &mut PacketLog,
 ) -> Result<(DeviceInfo, Vec<Reading>, Vec<String>)> {
-    let mut raw_records: Vec<String> = Vec::new();
-    let mut device_info = DeviceInfo::default();
-    let mut readings: Vec<Reading> = Vec::new();
+    let mut builder = SessionBuilder::new(progress);
 
     loop {
         let (record, raw) = get_one_record(device, packets)?;
 
-        if !raw.is_empty() {
-            raw_records.push(raw);
-        }
-
-        match record {
-            Record::Header(info) => device_info = info,
-            Record::Result(r) => {
-                if r.is_control {
-                    if progress {
-                        eprint!("\r{:80}\r", ""); // clear line
-                        eprintln!("(skipping control reading #{})", r.record_number);
-                    }
-                } else {
-                    if progress {
-                        let total = device_info.record_count;
-                        let n = readings.len() + 1;
-                        let pct = (100 * n as u32).checked_div(total).unwrap_or(0);
-                        eprint!(
-                            "\r[{n:>3}/{total}] {pct:>3}%  {}  {:.1} {}  {}{}",
-                            r.timestamp,
-                            r.value,
-                            r.units,
-                            if r.high {
-                                "HIGH "
-                            } else if r.low {
-                                "LOW  "
-                            } else {
-                                "     "
-                            },
-                            r.meal_marker.as_deref().unwrap_or(""),
-                        );
-                        let _ = std::io::stderr().flush();
-                    }
-                    readings.push(r);
-                }
-            }
-            Record::Skip => {}
-            Record::Terminator => {
+        match builder.push(record, raw) {
+            Flow::Continue => {}
+            Flow::Close => {
                 // The L record means the device is done and all readings are
                 // already captured. Close the session; any error during this
                 // trailing handshake is not a session failure.
                 close_session(device, packets);
                 break;
             }
-            Record::EndOfTransmission => break,
+            Flow::Stop => break,
         }
-    }
-
-    if progress {
-        // Move to a fresh line after the progress output
-        eprintln!();
     }
 
     // An empty session — not even an H record — means the meter ended the
     // transmission without sending anything. Observed when a new session
     // starts too soon after the previous one. A genuinely empty (fresh)
     // meter still sends its H/P/L records, so it does not trip this.
-    if raw_records.is_empty() {
-        return Err(anyhow!(
-            "Meter sent no records. It usually needs a short rest between \
-             sessions — wait ~10 seconds and retry."
-        ));
+    builder.finish(
+        "Meter sent no records. It usually needs a short rest between \
+         sessions — wait ~10 seconds and retry.",
+    )
+}
+
+/// What the caller should do after feeding a record to [`SessionBuilder`].
+enum Flow {
+    Continue,
+    /// Terminator (L) seen — a live session still needs closing down.
+    Close,
+    /// End of transmission — nothing further to do.
+    Stop,
+}
+
+/// Accumulates decoded records into device info + readings + raw frames.
+///
+/// Shared by the live read loop and by `--from-bytes` replay, so a capture
+/// replayed offline yields byte-identical output to the original session.
+struct SessionBuilder {
+    device: DeviceInfo,
+    readings: Vec<Reading>,
+    raw_records: Vec<String>,
+    progress: bool,
+}
+
+impl SessionBuilder {
+    fn new(progress: bool) -> Self {
+        Self {
+            device: DeviceInfo::default(),
+            readings: Vec::new(),
+            raw_records: Vec::new(),
+            progress,
+        }
     }
 
-    eprintln!(
-        "Done: {} readings from {} (S/N {})",
-        readings.len(),
-        device_info.model,
-        device_info.serial_number
-    );
+    /// Feed one decoded record and the raw frame text it came from.
+    fn push(&mut self, record: Record, raw: String) -> Flow {
+        if !raw.is_empty() {
+            self.raw_records.push(raw);
+        }
 
-    Ok((device_info, readings, raw_records))
+        match record {
+            Record::Header(info) => self.device = info,
+            Record::Result(r) => self.push_reading(r),
+            Record::Skip => {}
+            Record::Terminator => return Flow::Close,
+            Record::EndOfTransmission => return Flow::Stop,
+        }
+        Flow::Continue
+    }
+
+    fn push_reading(&mut self, r: Reading) {
+        if r.is_control {
+            if self.progress {
+                eprint!("\r{:80}\r", ""); // clear line
+                eprintln!("(skipping control reading #{})", r.record_number);
+            }
+            return;
+        }
+
+        if self.progress {
+            let total = self.device.record_count;
+            let n = self.readings.len() + 1;
+            let pct = (100 * n as u32).checked_div(total).unwrap_or(0);
+            eprint!(
+                "\r[{n:>3}/{total}] {pct:>3}%  {}  {:.1} {}  {}{}",
+                r.timestamp,
+                r.value,
+                r.units,
+                if r.high {
+                    "HIGH "
+                } else if r.low {
+                    "LOW  "
+                } else {
+                    "     "
+                },
+                r.meal_marker.as_deref().unwrap_or(""),
+            );
+            let _ = std::io::stderr().flush();
+        }
+        self.readings.push(r);
+    }
+
+    /// `empty_err` is the message for a session that decoded no records at
+    /// all — the advice differs between a live meter and a capture file.
+    fn finish(self, empty_err: &str) -> Result<(DeviceInfo, Vec<Reading>, Vec<String>)> {
+        if self.progress {
+            // Move to a fresh line after the progress output
+            eprintln!();
+        }
+
+        if self.raw_records.is_empty() {
+            return Err(anyhow!("{empty_err}"));
+        }
+
+        eprintln!(
+            "Done: {} readings from {} (S/N {})",
+            self.readings.len(),
+            self.device.model,
+            self.device.serial_number
+        );
+
+        Ok((self.device, self.readings, self.raw_records))
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1215,5 +1425,155 @@ mod tests {
         assert!(!readings[4].low);
         assert!(readings[5].low);
         assert!(!readings[5].high);
+    }
+
+    // ── Binary capture + replay ───────────────────────────────────────────────
+
+    const LF: u8 = b'\n';
+
+    fn packet(dir: Dir, data: &[u8]) -> Packet {
+        assert!(data.len() <= MAX_PAYLOAD, "payload too big for one packet");
+        let mut buf = [0u8; HID_PACKET_SIZE];
+        buf[3] = data.len() as u8;
+        buf[4..4 + data.len()].copy_from_slice(data);
+        Packet { dir, data: buf }
+    }
+
+    /// Frame one record line as the meter would (STX, seq, content, CR, ETX,
+    /// checksum, CR, LF) and split it across HID packets.
+    fn framed(seq: u8, record: &str) -> Vec<Packet> {
+        let mut checked = vec![b'0' + seq];
+        checked.extend_from_slice(record.as_bytes());
+        checked.extend_from_slice(&[CR, ETX]);
+
+        let mut msg = vec![STX];
+        msg.extend_from_slice(&checked);
+        msg.extend_from_slice(compute_checksum(&checked).as_bytes());
+        msg.extend_from_slice(&[CR, LF]);
+
+        msg.chunks(MAX_PAYLOAD)
+            .map(|c| packet(Dir::Rx, c))
+            .collect()
+    }
+
+    fn fixture_lines() -> Vec<&'static str> {
+        FIXTURE
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect()
+    }
+
+    /// A capture of the fixture session, interleaved with the host ACKs that
+    /// a real log contains — replay must ignore its own TX traffic.
+    fn fixture_capture() -> Vec<Packet> {
+        let mut packets = vec![packet(Dir::Tx, &[ACK])];
+        for (i, line) in fixture_lines().iter().enumerate() {
+            packets.extend(framed((i % 8) as u8, line));
+            packets.push(packet(Dir::Tx, &[ACK]));
+        }
+        packets.push(packet(Dir::Rx, &[EOT]));
+        packets
+    }
+
+    fn summarise(readings: &[Reading]) -> Vec<(u32, f64, String)> {
+        readings
+            .iter()
+            .map(|r| (r.record_number, r.value, r.timestamp.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn encode_decode_packets_round_trip() {
+        let packets = fixture_capture();
+        let decoded = decode_packets(&encode_packets(&packets)).unwrap();
+
+        assert_eq!(decoded.len(), packets.len());
+        for (a, b) in decoded.iter().zip(&packets) {
+            assert_eq!(a.data, b.data);
+            assert_eq!(a.dir.to_string(), b.dir.to_string());
+        }
+    }
+
+    #[test]
+    fn decode_packets_rejects_foreign_and_damaged_files() {
+        let good = encode_packets(&fixture_capture());
+
+        assert!(decode_packets(b"").is_err(), "empty file");
+        assert!(
+            decode_packets(b"0000  06 ").is_err(),
+            "hex dump, not a capture"
+        );
+
+        let mut bad_version = good.clone();
+        bad_version[CAPTURE_MAGIC.len()] = CAPTURE_VERSION + 1;
+        assert!(decode_packets(&bad_version).is_err(), "future version");
+
+        let mut bad_dir = good.clone();
+        bad_dir[CAPTURE_HEADER_LEN] = 9;
+        assert!(decode_packets(&bad_dir).is_err(), "bad direction byte");
+
+        // Losing the tail must fail loudly, not yield a short reading list.
+        assert!(
+            decode_packets(&good[..good.len() - 10]).is_err(),
+            "truncated capture"
+        );
+    }
+
+    /// The point of the whole exercise: a replayed capture must produce the
+    /// same session as parsing the records text the live read would have
+    /// written, so one device read really can feed every output format.
+    #[test]
+    fn replay_matches_text_parsing() {
+        let session = session_from_packets(fixture_capture()).unwrap();
+        let (device, readings) = parse_records_from_text(FIXTURE);
+
+        assert_eq!(session.raw_records, fixture_lines());
+        assert_eq!(summarise(&session.readings), summarise(&readings));
+        assert_eq!(session.device.serial_number, device.serial_number);
+        assert_eq!(session.device.model, device.model);
+        assert_eq!(session.device.record_count, device.record_count);
+    }
+
+    /// The H record is longer than one HID packet, so this also covers
+    /// multi-packet reassembly surviving a trip through the binary file.
+    #[test]
+    fn replay_survives_a_file_round_trip() {
+        let bytes = encode_packets(&fixture_capture());
+        let session = session_from_packets(decode_packets(&bytes).unwrap()).unwrap();
+
+        assert!(
+            framed(0, fixture_lines()[0]).len() > 1,
+            "fixture H record should span several packets"
+        );
+        assert_eq!(session.raw_records, fixture_lines());
+        // Re-encoding what we decoded must be byte-identical.
+        assert_eq!(encode_packets(&session.raw_packets), bytes);
+    }
+
+    #[test]
+    fn replay_skips_frames_the_meter_retried() {
+        let lines = fixture_lines();
+        let mut packets = vec![packet(Dir::Tx, &[ACK])];
+        for (i, line) in lines.iter().enumerate() {
+            // A corrupt frame, NAK'd in the live session, then resent.
+            if i == 2 {
+                let mut broken = framed(1, "R|9|^^^Glucose|5.0|mmol/L^P||T0/M0||20200101090000");
+                let last = broken.last_mut().unwrap();
+                last.data[5] = b'Z'; // break the checksum
+                packets.extend(broken);
+            }
+            packets.extend(framed((i % 8) as u8, line));
+        }
+        packets.push(packet(Dir::Rx, &[EOT]));
+
+        let session = session_from_packets(packets).unwrap();
+        assert_eq!(session.raw_records, lines, "retried frame must not appear");
+    }
+
+    #[test]
+    fn empty_capture_is_an_error_not_an_empty_session() {
+        let err = session_from_packets(vec![packet(Dir::Rx, &[EOT])]).unwrap_err();
+        assert!(err.to_string().contains("no records"), "got: {err}");
     }
 }
