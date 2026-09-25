@@ -58,12 +58,12 @@ bgl-read --list
 
 ### Output formats
 
-| `--format` | Description |
-|---|---|
-| `json` | Device info and readings as pretty-printed JSON |
-| `csv` | One reading per row, header included |
-| `records` | Raw ASTM record text as received from the meter (useful for debugging) |
-| `bytes` | Hex dump of every HID packet exchanged (TX and RX) |
+| `--format` | Description                                                            |
+|------------|------------------------------------------------------------------------|
+| `json`     | Device info and readings as pretty-printed JSON                        |
+| `csv`      | One reading per row, header included                                   |
+| `records`  | Raw ASTM record text as received from the meter (useful for debugging) |
+| `bytes`    | Hex dump of every HID packet exchanged (TX and RX)                     |
 
 Timestamps are in the meter's own local time (no timezone attached — the device
 has no concept of timezone).
@@ -74,14 +74,14 @@ has no concept of timezone).
 
 All Contour Next devices share USB vendor ID `0x1A79` (Ascensia / Bayer).
 
-| Product ID | Device |
-|------------|--------|
-| `0x7800` | Contour Next One (USB-only variant) |
-| `0x7440` | Contour Next USB |
-| `0x7350` | Contour Next |
-| `0x7900` | Ascensia Contour Next |
-| `0x6220` | Contour Next Link |
-| `0x6230` | Contour Next Link 2.4 |
+| Product ID | Device                              |
+|------------|-------------------------------------|
+| `0x7800`   | Contour Next One (USB-only variant) |
+| `0x7440`   | Contour Next USB                    |
+| `0x7350`   | Contour Next                        |
+| `0x7900`   | Ascensia Contour Next               |
+| `0x6220`   | Contour Next Link                   |
+| `0x6230`   | Contour Next Link 2.4               |
 
 The tool opens the first matching device it finds. Run `--list` to see what is
 connected.
