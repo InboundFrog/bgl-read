@@ -11,10 +11,6 @@ CAP_DIR="${PRJ_DIR}/captures"
 DATE_CAP=$(date "+%Y%m%d")
 PREFIX="${1:-unknown}"
 
-echo_err() {
-  echo "$1" >&2
-}
-
 # Ensure the captures directory exists
 mkdir -p "${CAP_DIR}/${DATE_CAP}"
 
