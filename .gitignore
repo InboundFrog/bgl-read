@@ -9,3 +9,8 @@
 
 # Claude local only configs
 .claude/*.local.*
+.claude/worktrees/
+
+# IDE - JetBrains
+.idea/
+*.iml
