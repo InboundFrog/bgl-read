@@ -24,6 +24,7 @@ jobs:
         dir: ['.']
     with:
       working-directory: ${{ matrix.dir }}
+      apt-packages: 'libudev-dev pkg-config'
 
   shell:
     uses: InboundFrog/repo-tools/.github/workflows/shell.yml@500e0a8474bc5f01dc50320aa0ec4bb5e680c498 # v0.0.1
