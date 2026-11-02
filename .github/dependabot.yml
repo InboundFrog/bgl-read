@@ -1,10 +1,13 @@
-# Managed by repo-tools (bin/repo-dependabot). Local edits will be overwritten.
-# Customise via .github/repo-tools.conf instead: https://github.com/InboundFrog/repo-tools
+# Dependabot version updates, from the repo-tools sample:
+# https://github.com/InboundFrog/repo-tools/blob/main/examples/dependabot.yml
+#
+# github-actions covers the repo-tools pins in .github/workflows/ci.yml too, so
+# a new release arrives as a PR here after the cooldown. Minor and patch
+# updates share one PR per ecosystem; majors get their own.
 version: 2
 updates:
   - package-ecosystem: github-actions
-    directories:
-      - '/'
+    directories: ['/']
     schedule:
       interval: weekly
     cooldown:
@@ -12,9 +15,9 @@ updates:
     groups:
       github-actions:
         patterns: ["*"]
+
   - package-ecosystem: cargo
-    directories:
-      - '/'
+    directories: ['/']
     schedule:
       interval: weekly
     cooldown:
