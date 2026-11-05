@@ -20,14 +20,14 @@ concurrency:
 
 jobs:
   rust:
-    uses: InboundFrog/repo-tools/.github/workflows/rust.yml@bf24833e55abb4f21a6061c41f045efb4963181d # v0.1.0
+    uses: InboundFrog/repo-tools/.github/workflows/rust.yml@11670fe8f6e9cddf7be79989e2da4ae48f399584 # v0.1.1
     with:
       working-directory: .
       # hidapi links against libudev.
       apt-packages: libudev-dev pkg-config
 
   shell:
-    uses: InboundFrog/repo-tools/.github/workflows/shell.yml@bf24833e55abb4f21a6061c41f045efb4963181d # v0.1.0
+    uses: InboundFrog/repo-tools/.github/workflows/shell.yml@11670fe8f6e9cddf7be79989e2da4ae48f399584 # v0.1.1
     with:
       working-directory: .
 
