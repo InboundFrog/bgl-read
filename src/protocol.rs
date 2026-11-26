@@ -53,10 +53,10 @@ const CR: u8 = 0x0D;
 const HID_PACKET_SIZE: usize = 64;
 // Maximum data bytes per HID packet = 64 total - 4 overhead (3 header + 1 length byte)
 const MAX_PAYLOAD: usize = HID_PACKET_SIZE - 4;
-/// Transient I/O retries (receive_message returned Err).
-const IO_RETRIES: u32 = 6;
-/// Protocol-violation retries (unexpected message type or parse failure).
-const PROTO_RETRIES: u32 = 6;
+/// Most passes of the receive loop that may end without a record.
+/// Receive errors, parse errors, unexpected bytes, ENQ and ACK all count.
+/// A normal start needs one or two passes, so 6 leaves room.
+const MAX_RETRIES: u32 = 6;
 const RECEIVE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Timeout for the meter's EOT reply during the NAK close handshake.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -759,6 +759,7 @@ pub fn session_from_records_text(text: &str) -> Session {
 
 /// Send one command, receive one complete message, retry with NAK on transient errors.
 fn get_one_record(device: &HidDevice, log: &mut PacketLog) -> Result<(Record, String)> {
+    // Counts every pass that does not return a record.
     let mut retries = 0u32;
     let mut cmd = ACK;
 
@@ -770,38 +771,47 @@ fn get_one_record(device: &HidDevice, log: &mut PacketLog) -> Result<(Record, St
             Ok(m) => m,
             Err(e) => {
                 retries += 1;
-                if retries >= IO_RETRIES {
+                if retries >= MAX_RETRIES {
                     return Err(e);
                 }
-                eprintln!("Receive error ({retries}/{IO_RETRIES}): {e}");
+                eprintln!("Receive error ({retries}/{MAX_RETRIES}): {e}");
                 cmd = NAK;
                 continue;
             }
         };
 
         match msg.msg_type {
-            // Device signalling it's ready to send — ACK and loop to get actual data
-            ENQ => continue,
             EOT => return Ok((Record::EndOfTransmission, String::new())),
-            ACK => continue,
             STX => match parse_record(&msg.frame) {
                 Ok(record) => return Ok((record, msg.frame)),
                 Err(e) => {
                     retries += 1;
-                    if retries >= PROTO_RETRIES {
+                    if retries >= MAX_RETRIES {
                         return Err(e);
                     }
-                    eprintln!("Parse error ({retries}/{PROTO_RETRIES}): {e}");
+                    eprintln!("Parse error ({retries}/{MAX_RETRIES}): {e}");
                     cmd = NAK;
                 }
             },
-            other => {
+            // ENQ or ACK: the meter is not ready to send yet. ACK again, but
+            // count the pass so a device that never sends data cannot loop forever.
+            ENQ | ACK => {
                 retries += 1;
-                if retries >= PROTO_RETRIES {
+                if retries >= MAX_RETRIES {
                     return Err(anyhow!(
-                        "Unexpected message byte {other:#04x} after {PROTO_RETRIES} retries"
+                        "Meter sent {:#04x} {MAX_RETRIES} times but no data",
+                        msg.msg_type
                     ));
                 }
+            }
+            other => {
+                retries += 1;
+                if retries >= MAX_RETRIES {
+                    return Err(anyhow!(
+                        "Unexpected message byte {other:#04x} after {MAX_RETRIES} retries"
+                    ));
+                }
+                eprintln!("Unexpected message byte {other:#04x} ({retries}/{MAX_RETRIES})");
                 cmd = NAK;
             }
         }
