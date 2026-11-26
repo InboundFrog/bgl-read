@@ -12,6 +12,11 @@ DATE_CAP=$(date "+%Y%m%d")
 PREFIX="${1:-unknown}"
 OUT_DIR="${CAP_DIR}/${DATE_CAP}"
 
+# Run cargo on this project, whatever the current directory is.
+run_bgl() {
+  cargo run --manifest-path "${PRJ_DIR}/Cargo.toml" -- "$@"
+}
+
 # Ensure the captures directory exists
 mkdir -p "${OUT_DIR}"
 
@@ -23,12 +28,12 @@ trap 'rm -rf "${WORK_DIR}"' EXIT
 STEM="${WORK_DIR}/${PREFIX}-bgl"
 
 # The only time we touch the meter: capture the raw HID packet stream once.
-cargo run -- --format binary --progress --output "${STEM}.bin"
+run_bgl --format binary --progress --output "${STEM}.bin"
 
 # Every other format is replayed from that capture, offline.
-cargo run -- --from-bytes "${STEM}.bin" --format records --output "${STEM}.txt"
-cargo run -- --from-bytes "${STEM}.bin" --format csv     --output "${STEM}.csv"
-cargo run -- --from-bytes "${STEM}.bin" --format json    --output "${STEM}.json"
-cargo run -- --from-bytes "${STEM}.bin" --format bytes   --output "${STEM}.hex"
+run_bgl --from-bytes "${STEM}.bin" --format records --output "${STEM}.txt"
+run_bgl --from-bytes "${STEM}.bin" --format csv     --output "${STEM}.csv"
+run_bgl --from-bytes "${STEM}.bin" --format json    --output "${STEM}.json"
+run_bgl --from-bytes "${STEM}.bin" --format bytes   --output "${STEM}.hex"
 
 mv "${WORK_DIR}"/* "${OUT_DIR}/"
