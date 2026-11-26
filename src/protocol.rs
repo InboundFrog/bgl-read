@@ -750,11 +750,13 @@ pub fn session_from_records_text(text: &str) -> Session {
     let mut readings = Vec::new();
     let mut raw_records = Vec::new();
     let mut unparsed = 0usize;
+    let mut saw_terminator = false;
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
         raw_records.push(line.to_string());
         match parse_record(line) {
             Ok(Record::Header(info)) => device = info,
             Ok(Record::Result(r)) if !r.is_control => readings.push(r),
+            Ok(Record::Terminator) => saw_terminator = true,
             // Control readings and the P/C/O/M/Q/S/L record types are
             // recognised and deliberately carry nothing into the output.
             Ok(_) => {}
@@ -769,6 +771,9 @@ pub fn session_from_records_text(text: &str) -> Session {
             "warning: {unparsed} of {} line(s) could not be parsed; output may be incomplete",
             raw_records.len()
         );
+    }
+    if !raw_records.is_empty() && !saw_terminator {
+        eprintln!("warning: no L (terminator) record found; the dump may be incomplete");
     }
     Session {
         device,
@@ -942,6 +947,7 @@ struct SessionBuilder {
     readings: Vec<Reading>,
     raw_records: Vec<String>,
     progress: bool,
+    saw_terminator: bool,
 }
 
 impl SessionBuilder {
@@ -951,6 +957,7 @@ impl SessionBuilder {
             readings: Vec::new(),
             raw_records: Vec::new(),
             progress,
+            saw_terminator: false,
         }
     }
 
@@ -964,7 +971,10 @@ impl SessionBuilder {
             Record::Header(info) => self.device = info,
             Record::Result(r) => self.push_reading(r),
             Record::Skip => {}
-            Record::Terminator => return Flow::Close,
+            Record::Terminator => {
+                self.saw_terminator = true;
+                return Flow::Close;
+            }
             Record::EndOfTransmission => return Flow::Stop,
         }
         Flow::Continue
@@ -1012,6 +1022,13 @@ impl SessionBuilder {
 
         if self.raw_records.is_empty() {
             return Err(anyhow!("{empty_err}"));
+        }
+
+        // Without the L record the list may be short. Do not call it done.
+        if !self.saw_terminator {
+            return Err(anyhow!(
+                "Session ended before the L (terminator) record, so the data is incomplete."
+            ));
         }
 
         eprintln!(
@@ -1640,5 +1657,38 @@ mod tests {
     fn empty_capture_is_an_error_not_an_empty_session() {
         let err = session_from_packets(vec![packet(Dir::Rx, &[EOT])]).unwrap_err();
         assert!(err.to_string().contains("no records"), "got: {err}");
+    }
+
+    /// Packets for the fixture records without the final L record.
+    fn capture_without_terminator() -> Vec<Packet> {
+        let lines = fixture_lines();
+        assert!(lines.last().unwrap().starts_with('L'));
+        let mut packets = Vec::new();
+        for (i, line) in lines[..lines.len() - 1].iter().enumerate() {
+            packets.extend(framed((i % 8) as u8, line));
+        }
+        packets
+    }
+
+    #[test]
+    fn capture_ending_with_eot_but_no_l_record_is_an_error() {
+        let mut packets = capture_without_terminator();
+        packets.push(packet(Dir::Rx, &[EOT]));
+        let err = session_from_packets(packets).unwrap_err();
+        assert!(err.to_string().contains("incomplete"), "got: {err}");
+    }
+
+    #[test]
+    fn capture_that_just_stops_is_an_error() {
+        let err = session_from_packets(capture_without_terminator()).unwrap_err();
+        assert!(err.to_string().contains("incomplete"), "got: {err}");
+    }
+
+    #[test]
+    fn records_text_without_l_line_still_returns_readings() {
+        let lines = fixture_lines();
+        let text = lines[..lines.len() - 1].join("\n");
+        let session = session_from_records_text(&text);
+        assert!(!session.readings.is_empty());
     }
 }
