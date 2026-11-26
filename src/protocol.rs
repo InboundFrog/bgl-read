@@ -167,7 +167,7 @@ pub fn list_devices(api: &HidApi) {
             "{name}  VID={:#06x}  PID={:#06x}  S/N={}",
             dev.vendor_id(),
             dev.product_id(),
-            dev.serial_number().unwrap_or("")
+            dev.serial_number().unwrap_or("").escape_debug()
         );
     }
     if !found {
