@@ -51,11 +51,11 @@ const CR: u8 = 0x0D;
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const HID_PACKET_SIZE: usize = 64;
-// Most data bytes in one HID packet: 64 total minus 4 for overhead (3 header bytes + 1 length byte).
+// Maximum data bytes per HID packet = 64 total - 4 overhead (3 header + 1 length byte)
 const MAX_PAYLOAD: usize = HID_PACKET_SIZE - 4;
-/// Retries for temporary I/O errors (receive_message returned Err).
+/// Transient I/O retries (receive_message returned Err).
 const IO_RETRIES: u32 = 6;
-/// Retries for protocol errors (unexpected message type or parse failure).
+/// Protocol-violation retries (unexpected message type or parse failure).
 const PROTO_RETRIES: u32 = 6;
 const RECEIVE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long to wait for the meter's EOT reply when closing with a NAK.
