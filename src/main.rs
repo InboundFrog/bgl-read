@@ -107,7 +107,10 @@ fn main() -> Result<()> {
                     Format::Binary => Format::Binary,
                     _ => Format::Bytes,
                 };
-                output::write(&partial, dump, cli.output.as_deref())?;
+                // Do not let a dump failure hide the session error below.
+                if let Err(dump_err) = output::write(&partial, dump, cli.output.as_deref()) {
+                    eprintln!("warning: could not write the packet dump: {dump_err}");
+                }
             }
             return Err(e.error);
         }
