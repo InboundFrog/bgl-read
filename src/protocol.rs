@@ -661,14 +661,21 @@ pub fn decode_packets(bytes: &[u8]) -> Result<Vec<Packet>> {
 /// Rebuild a Session by replaying captured HID packets through the same
 /// framing and record parsing the live read uses.
 ///
-/// Only RX packets carry meter data — TX entries are our own ACK/NAK traffic.
+/// Only RX packets carry meter data. TX entries are our own ACK/NAK traffic.
+/// A TX packet also marks the start of a new receive: the live read always
+/// writes before it reads, and it drops any half-read message. Replay does the
+/// same, so a partial message cannot corrupt the meter's resend.
 /// Messages that fail to decode are skipped: in the live session those were
 /// NAK'd and retried, so the retry's good copy appears later in the stream.
 pub fn session_from_packets(packets: Vec<Packet>) -> Result<Session> {
     let mut asm = MessageAssembler::new();
     let mut builder = SessionBuilder::new(false);
 
-    for pkt in packets.iter().filter(|p| matches!(p.dir, Dir::Rx)) {
+    for pkt in &packets {
+        if matches!(pkt.dir, Dir::Tx) {
+            asm = MessageAssembler::new();
+            continue;
+        }
         let Some(Ok(msg)) = asm.push(&pkt.data) else {
             continue;
         };
@@ -1569,6 +1576,28 @@ mod tests {
 
         let session = session_from_packets(packets).unwrap();
         assert_eq!(session.raw_records, lines, "retried frame must not appear");
+    }
+
+    #[test]
+    fn replay_drops_partial_message_before_a_resend() {
+        let lines = fixture_lines();
+        let mut packets = vec![packet(Dir::Tx, &[ACK])];
+        for (i, line) in lines.iter().enumerate() {
+            let frame = framed((i % 8) as u8, line);
+            if i == 0 {
+                // The read timed out after the first packet. We sent NAK and
+                // the meter sent the whole message again.
+                assert!(frame.len() > 1, "H record must span several packets");
+                packets.push(frame[0].clone());
+                packets.push(packet(Dir::Tx, &[NAK]));
+            }
+            packets.extend(frame);
+        }
+        packets.push(packet(Dir::Rx, &[EOT]));
+
+        let session = session_from_packets(packets).unwrap();
+        assert_eq!(session.raw_records, lines);
+        assert_eq!(session.device.model, "ContourTest");
     }
 
     #[test]
