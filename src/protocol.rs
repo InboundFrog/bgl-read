@@ -113,7 +113,7 @@ pub struct Reading {
 }
 
 /// Direction of a captured HID packet.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dir {
     Tx,
     Rx,
@@ -129,7 +129,7 @@ impl fmt::Display for Dir {
 }
 
 /// One captured HID packet (raw 64 bytes + direction).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Packet {
     pub dir: Dir,
     pub data: [u8; HID_PACKET_SIZE],
@@ -1497,11 +1497,7 @@ mod tests {
         let packets = fixture_capture();
         let decoded = decode_packets(&encode_packets(&packets)).unwrap();
 
-        assert_eq!(decoded.len(), packets.len());
-        for (a, b) in decoded.iter().zip(&packets) {
-            assert_eq!(a.data, b.data);
-            assert_eq!(a.dir.to_string(), b.dir.to_string());
-        }
+        assert_eq!(decoded, packets);
     }
 
     #[test]
