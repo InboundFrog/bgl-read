@@ -55,7 +55,18 @@ fn main() -> Result<()> {
 
     if let Some(path) = cli.from_bytes.as_deref() {
         let packets = protocol::decode_packets(&std::fs::read(path)?)?;
-        let session = protocol::session_from_packets(packets)?;
+        // A packet dump needs no session. Skipping the rebuild lets a person
+        // dump an incomplete capture, which is when a dump helps most.
+        let session = if matches!(cli.format, Format::Bytes | Format::Binary) {
+            protocol::Session {
+                device: protocol::DeviceInfo::default(),
+                readings: Vec::new(),
+                raw_records: Vec::new(),
+                raw_packets: packets,
+            }
+        } else {
+            protocol::session_from_packets(packets)?
+        };
         return output::write(&session, cli.format, cli.output.as_deref());
     }
 
