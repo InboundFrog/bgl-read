@@ -4,19 +4,19 @@
 
 This is based on the [Sensotrend/sensotrend-uploader](https://github.com/Sensotrend/sensotrend-uploader/).
 
-I just needed to be able to read data from a Contour Next One (older USB model)
-to grab the BGL data for someone else.
+I needed to read data from a Contour Next One (older USB model). I wanted the
+BGL data for someone else.
 
-[Claude](https://claude.com/product/claude-code) did all the hard yards
-figuring out how to convert the small portion I needed into Rust.
+[Claude](https://claude.com/product/claude-code) did most of the hard work. It
+converted the small part I needed into Rust.
 
 ## Overview
 
-Reads blood glucose readings from a Bayer/Ascensia Contour Next USB meter and
-outputs them in one of five formats (JSON by default).
+This tool reads blood glucose readings from a Bayer/Ascensia Contour Next USB
+meter. It outputs them in one of five formats. The default is JSON.
 
-Tested against the **Contour Next One** (USB model). Other Contour Next variants
-that use the same ASTM-over-HID protocol should also work — see
+It is tested with the **Contour Next One** (USB model). Other Contour Next
+variants use the same ASTM-over-HID protocol, so they should also work. See
 [`docs/devices/contour-next.md`](docs/devices/contour-next.md) for protocol
 details.
 
@@ -28,16 +28,16 @@ details.
 cargo build --release
 ```
 
-The binary ends up at `target/release/bgl-read`.
+The binary is at `target/release/bgl-read`.
 
-On macOS you may need to grant input-device access the first time you run it;
-the OS will prompt you.
+On macOS, you may need to allow input-device access the first time you run it.
+The OS asks you.
 
 ---
 
 ## Running
 
-Plug the meter in via USB, then:
+Plug the meter into a USB port. Then run:
 
 ```sh
 # JSON (default) — device info + all readings
@@ -62,11 +62,11 @@ bgl-read --from-bytes session.bin --format csv --output readings.csv
 
 ### Reading the meter only once
 
-Every run that talks to the meter is a full transfer of up to 800 records, so
-producing four formats used to mean four transfers. `--format binary` writes
-the raw HID packet stream to a file, and `--from-bytes` replays that file
-through the same framing and parsing code the live read uses — so a single
-transfer can produce every format, the `bytes` hex dump included.
+Each run that talks to the meter transfers up to 800 records. Before, four
+formats needed four transfers. Now `--format binary` writes the raw HID packet
+stream to a file. `--from-bytes` reads that file with the same framing and
+parsing code as a live read. So one transfer can make every format, including
+the `bytes` hex dump.
 
 ```sh
 bgl-read --format binary --progress --output session.bin
@@ -76,23 +76,23 @@ bgl-read --from-bytes session.bin --format json    --output session.json
 bgl-read --from-bytes session.bin --format bytes   --output session.hex
 ```
 
-`bin/capture-bgl <prefix>` does exactly this and leaves the files in
+`bin/capture-bgl <prefix>` does this for you. It saves the files in
 `captures/<date>/`.
 
-`--from-records FILE` is the narrower version: it re-parses a saved `records`
-dump, which is enough for `csv` and `json` but cannot reproduce `bytes` or
-`binary`, because the text dump does not carry the HID traffic. Both replay
-flags are offline-only, so neither accepts `--progress`.
+`--from-records FILE` does less. It parses a saved `records` dump again. This
+is enough for `csv` and `json`. It cannot make `bytes` or `binary`, because the
+text dump has no HID traffic. Both replay flags work offline only, so neither
+accepts `--progress`.
 
-Damaged input is reported rather than quietly producing a short reading list:
-`--from-bytes` rejects a truncated or foreign file outright, and
-`--from-records` warns on stderr with a count of the lines it could not parse.
+The tool reports damaged input. It does not quietly give a short list of
+readings. `--from-bytes` rejects a cut-off or foreign file. `--from-records`
+warns on stderr and gives a count of the lines it could not parse.
 
 ### Output formats
 
-Formats are chosen with `--format`, and `--output FILE` writes to a file
-instead of stdout. `binary` refuses to write to a terminal — give it `--output`
-or pipe it somewhere.
+Use `--format` to choose a format. Use `--output FILE` to write to a file
+instead of stdout. `binary` refuses to write to a terminal. Give it `--output`
+or pipe it to another program.
 
 | `--format` | Description                                                            |
 |------------|------------------------------------------------------------------------|
@@ -102,8 +102,8 @@ or pipe it somewhere.
 | `bytes`    | Hex dump of every HID packet exchanged (TX and RX)                     |
 | `binary`   | Compact binary packet capture, replayable with `--from-bytes`          |
 
-Timestamps are in the meter's own local time (no timezone attached — the device
-has no concept of timezone).
+Timestamps use the meter's own local time. They have no timezone, because the
+device does not know about timezones.
 
 ---
 
@@ -120,20 +120,20 @@ All Contour Next devices share USB vendor ID `0x1A79` (Ascensia / Bayer).
 | `0x6220`   | Contour Next Link                   |
 | `0x6230`   | Contour Next Link 2.4               |
 
-The tool opens the first matching device it finds. Run `--list` to see what is
-connected.
+The tool opens the first matching device it finds. Run `--list` to see the
+connected devices.
 
 ---
 
 ## Notes
 
-- The meter stores the **800 most recent readings** in a circular buffer —
-  older readings are silently overwritten. Read regularly if you need a
-  complete history.
-- **Control solution** readings (used to verify the meter) are detected via the
-  annotation field and excluded from output.
-- `--format records` output is the **raw meter transcript**: the header (`H`)
-  line includes the meter's **password** and serial number, and the dump
-  contains every reading. The `bytes` and `binary` captures hold that same
-  transcript verbatim. Redact these before sharing dumps publicly (e.g. when
-  filing issues).
+- The meter stores the **800 most recent readings** in a circular buffer.
+  New readings overwrite older ones without a warning. Read the meter often if
+  you need the full history.
+- **Control solution** readings (used to check the meter) are found in the
+  annotation field. The tool leaves them out of the output.
+- `--format records` output is the **raw meter transcript**. The header (`H`)
+  line has the meter's **password** and serial number. The dump has every
+  reading. The `bytes` and `binary` captures hold the same transcript without
+  changes. Remove these details before you share a dump in public, for example
+  in an issue.
