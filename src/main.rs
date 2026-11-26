@@ -59,10 +59,8 @@ fn main() -> Result<()> {
         // dump an incomplete capture, which is when a dump helps most.
         let session = if matches!(cli.format, Format::Bytes | Format::Binary) {
             protocol::Session {
-                device: protocol::DeviceInfo::default(),
-                readings: Vec::new(),
-                raw_records: Vec::new(),
                 raw_packets: packets,
+                ..Default::default()
             }
         } else {
             protocol::session_from_packets(packets)?
@@ -100,10 +98,8 @@ fn main() -> Result<()> {
                     e.packets.len()
                 );
                 let partial = protocol::Session {
-                    device: protocol::DeviceInfo::default(),
-                    readings: Vec::new(),
-                    raw_records: Vec::new(),
                     raw_packets: e.packets,
+                    ..Default::default()
                 };
                 // Dump in whichever capture format was asked for, so a
                 // `--format binary` failure still leaves a replayable file.

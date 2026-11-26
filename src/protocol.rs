@@ -136,7 +136,7 @@ pub struct Packet {
 }
 
 /// Everything captured during a session.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Session {
     pub device: DeviceInfo,
     pub readings: Vec<Reading>,
@@ -686,7 +686,7 @@ pub fn decode_packets(bytes: &[u8]) -> Result<Vec<Packet>> {
 /// same, so a partial message cannot corrupt the meter's resend.
 /// Messages that fail to decode are skipped: in the live session those were
 /// NAK'd and retried, so the retry's good copy appears later in the stream.
-pub fn session_from_packets(packets: Vec<Packet>) -> Result<Session> {
+pub fn session_from_packets(mut packets: Vec<Packet>) -> Result<Session> {
     let mut asm = MessageAssembler::new();
     let mut builder = SessionBuilder::new(false);
 
@@ -715,17 +715,11 @@ pub fn session_from_packets(packets: Vec<Packet>) -> Result<Session> {
         }
     }
 
-    let (device, readings, raw_records) = builder.finish(
+    builder.finish(
         "Capture contains no records — it may be truncated, or from a session that failed \
          before the meter sent anything.",
-    )?;
-
-    Ok(Session {
-        device,
-        readings,
-        raw_records,
-        raw_packets: packets,
-    })
+        &mut packets,
+    )
 }
 
 // ── Text-format round-trip ────────────────────────────────────────────────────
@@ -885,25 +879,13 @@ pub fn fetch_all(
     capture_packets: bool,
 ) -> Result<Session, FetchError> {
     let mut log = PacketLog::new(capture_packets);
-    match fetch_all_inner(device, progress, &mut log) {
-        Ok((device_info, readings, raw_records)) => Ok(Session {
-            device: device_info,
-            readings,
-            raw_records,
-            raw_packets: log.packets,
-        }),
-        Err(error) => Err(FetchError {
-            error,
-            packets: log.packets,
-        }),
-    }
+    fetch_all_inner(device, progress, &mut log).map_err(|error| FetchError {
+        error,
+        packets: log.packets,
+    })
 }
 
-fn fetch_all_inner(
-    device: &HidDevice,
-    progress: bool,
-    packets: &mut PacketLog,
-) -> Result<(DeviceInfo, Vec<Reading>, Vec<String>)> {
+fn fetch_all_inner(device: &HidDevice, progress: bool, packets: &mut PacketLog) -> Result<Session> {
     let mut builder = SessionBuilder::new(progress);
 
     loop {
@@ -929,6 +911,7 @@ fn fetch_all_inner(
     builder.finish(
         "Meter sent no records. It usually needs a short rest between \
          sessions — wait ~10 seconds and retry.",
+        &mut packets.packets,
     )
 }
 
@@ -1020,7 +1003,10 @@ impl SessionBuilder {
 
     /// `empty_err` is the message for a session that decoded no records at
     /// all — the advice differs between a live meter and a capture file.
-    fn finish(self, empty_err: &str) -> Result<(DeviceInfo, Vec<Reading>, Vec<String>)> {
+    ///
+    /// On success the packets move into the Session. On error they stay in
+    /// `packets`, so the caller can still dump them.
+    fn finish(self, empty_err: &str, packets: &mut Vec<Packet>) -> Result<Session> {
         if self.progress {
             // Move to a fresh line after the progress output
             eprintln!();
@@ -1044,7 +1030,12 @@ impl SessionBuilder {
             self.device.serial_number.escape_debug()
         );
 
-        Ok((self.device, self.readings, self.raw_records))
+        Ok(Session {
+            device: self.device,
+            readings: self.readings,
+            raw_records: self.raw_records,
+            raw_packets: std::mem::take(packets),
+        })
     }
 }
 
