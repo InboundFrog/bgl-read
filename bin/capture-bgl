@@ -35,7 +35,18 @@ mkdir -p "${OUT_DIR}"
 # at the end is a rename. A failure part-way through then leaves the previous
 # capture untouched instead of mixing fresh files with stale ones.
 WORK_DIR="$(mktemp -d "${OUT_DIR}/.${PREFIX}-XXXXXX")"
-trap 'rm -rf "${WORK_DIR}"' EXIT
+
+# On success, remove the staging directory. On failure, keep it: bgl-read
+# writes a partial packet dump when a read fails, and that dump helps debug.
+cleanup() {
+  local status=$?
+  if [[ ${status} -eq 0 ]]; then
+    rm -rf "${WORK_DIR}"
+  else
+    echo "capture-bgl: failed. Partial files kept in ${WORK_DIR}" >&2
+  fi
+}
+trap cleanup EXIT
 STEM="${WORK_DIR}/${PREFIX}-bgl"
 
 # The only time we touch the meter: capture the raw HID packet stream once.
