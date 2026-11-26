@@ -4,6 +4,10 @@
 # Add 'x' to the options if you want debug output
 set -euo pipefail
 
+# Captures hold health data and the meter password. Keep new files and
+# directories private to this user.
+umask 077
+
 # Don't touch these
 BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 PRJ_DIR="$(cd "${BIN_DIR}/../" > /dev/null 2>&1 && pwd)"
