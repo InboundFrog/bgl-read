@@ -421,7 +421,10 @@ fn parse_record(frame: &str) -> Result<Record> {
         //   Q = Query / inquiry
         //   S = Scientific
         Some('P' | 'C' | 'O' | 'M' | 'Q' | 'S') => Ok(Record::Skip),
-        Some(c) => Err(anyhow!("Unknown record type '{c}' in frame: {frame:?}")),
+        Some(c) => Err(anyhow!(
+            "Unknown record type '{}' in frame: {frame:?}",
+            c.escape_debug()
+        )),
         None => Err(anyhow!("Empty frame")),
     }
 }
@@ -995,9 +998,9 @@ impl SessionBuilder {
             let pct = (100 * n as u32).checked_div(total).unwrap_or(0);
             eprint!(
                 "\r[{n:>3}/{total}] {pct:>3}%  {}  {:.1} {}  {}{}",
-                r.timestamp,
+                r.timestamp.escape_debug(),
                 r.value,
-                r.units,
+                r.units.escape_debug(),
                 if r.high {
                     "HIGH "
                 } else if r.low {
@@ -1034,8 +1037,8 @@ impl SessionBuilder {
         eprintln!(
             "Done: {} readings from {} (S/N {})",
             self.readings.len(),
-            self.device.model,
-            self.device.serial_number
+            self.device.model.escape_debug(),
+            self.device.serial_number.escape_debug()
         );
 
         Ok((self.device, self.readings, self.raw_records))
@@ -1682,6 +1685,12 @@ mod tests {
     fn capture_that_just_stops_is_an_error() {
         let err = session_from_packets(capture_without_terminator()).unwrap_err();
         assert!(err.to_string().contains("incomplete"), "got: {err}");
+    }
+
+    #[test]
+    fn unknown_record_error_does_not_contain_raw_escape_byte() {
+        let err = parse_record("\x1b[2J|junk").unwrap_err().to_string();
+        assert!(!err.contains('\x1b'), "got: {err:?}");
     }
 
     #[test]
