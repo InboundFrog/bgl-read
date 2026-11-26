@@ -1390,12 +1390,21 @@ mod tests {
     }
 
     #[test]
-    fn fixture_reading_count_excludes_control() {
-        // Fixture has 6 R records; R|6 is a control (<) — wait, '<' is low, not control.
-        // R|5 has '>' (high), R|6 has '<' (low). Neither is control ('C').
-        // All 6 should appear in readings.
+    fn fixture_keeps_all_six_readings() {
+        // The fixture has no control reading, so all 6 R records are kept.
         let (_, readings) = parse_records_from_text(FIXTURE);
         assert_eq!(readings.len(), 6);
+    }
+
+    #[test]
+    fn control_reading_is_excluded_but_kept_raw() {
+        let text = FIXTURE.replace(
+            "L|1||N",
+            "R|7|^^^Glucose|5.5|mmol/L^P||C||20200102100000\nL|1||N",
+        );
+        let session = session_from_records_text(&text);
+        assert_eq!(session.readings.len(), 6);
+        assert!(session.raw_records.iter().any(|l| l.starts_with("R|7|")));
     }
 
     #[test]
