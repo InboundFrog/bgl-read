@@ -15,7 +15,7 @@
 //!
 //! ASTM frame structure inside the data bytes:
 //!   STX  seq_digit  record_text  CR  ETX|ETB  CS1  CS2  CR  LF
-//! Checksum covers: seq_digit through ETX/ETB (inclusive), sum of bytes mod 256, uppercase hex.
+//! The checksum covers seq_digit through ETX/ETB (inclusive). It is the sum of those bytes mod 256, in uppercase hex.
 
 use anyhow::{Result, anyhow};
 use hidapi::{HidApi, HidDevice};
@@ -51,19 +51,19 @@ const CR: u8 = 0x0D;
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const HID_PACKET_SIZE: usize = 64;
-// Maximum data bytes per HID packet = 64 total - 4 overhead (3 header + 1 length byte)
+// Most data bytes in one HID packet: 64 total minus 4 for overhead (3 header bytes + 1 length byte).
 const MAX_PAYLOAD: usize = HID_PACKET_SIZE - 4;
-/// Transient I/O retries (receive_message returned Err).
+/// Retries for temporary I/O errors (receive_message returned Err).
 const IO_RETRIES: u32 = 6;
-/// Protocol-violation retries (unexpected message type or parse failure).
+/// Retries for protocol errors (unexpected message type or parse failure).
 const PROTO_RETRIES: u32 = 6;
 const RECEIVE_TIMEOUT: Duration = Duration::from_secs(10);
-/// Timeout for the meter's EOT reply during the NAK close handshake.
+/// How long to wait for the meter's EOT reply when closing with a NAK.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
-/// Hard cap on reassembled message size — real ASTM frames are well under 1 KiB.
+/// Largest message we accept. Real ASTM frames are much smaller than 1 KiB.
 const MAX_MESSAGE_SIZE: usize = 64 * 1024;
-/// Default low/high glucose thresholds in mg/dL, used as fallbacks when the
-/// header config field is absent or unparseable.
+/// Default low and high glucose thresholds in mg/dL. We use them when the
+/// header config field is missing or cannot be parsed.
 const DEFAULT_LOW_THRESHOLD: u32 = 20;
 const DEFAULT_HIGH_THRESHOLD: u32 = 600;
 /// mmol/L → mg/dL conversion factor for glucose.
@@ -76,9 +76,11 @@ pub struct DeviceInfo {
     pub model: String,
     pub serial_number: String,
     pub record_count: u32,
-    /// Device's own clock at time of session, ISO 8601 local (no TZ)
+    /// The meter's own clock at the time of the session. ISO 8601 local time, no time zone.
     pub device_time: String,
+    /// Low limit in mg/dL. Values from mmol/L meters are converted.
     pub low_threshold: u32,
+    /// High limit in mg/dL. Values from mmol/L meters are converted.
     pub high_threshold: u32,
 }
 
@@ -270,13 +272,13 @@ struct Message {
     frame: String,
 }
 
-/// Receive and reassemble a complete ASTM message from one or more HID packets.
+/// Read one or more HID packets and join them into one complete ASTM message.
 ///
-/// Completion is signalled by:
-///   - Partial packet (SIZE < MAX_PAYLOAD)
-///   - First data byte is a single-byte control character (ENQ, EOT, ACK, NAK)
-///   - Data ends with the ASTM tail:  … CR  ETX|ETB  CS1 CS2  CR  LF
-///     which puts ETX/ETB at data[SIZE-5] (= pkt[SIZE-1] from start of packet)
+/// The message is complete when any of these is true:
+///   - The packet is not full (SIZE < MAX_PAYLOAD).
+///   - The first data byte is a single-byte control character (ENQ, EOT, ACK, NAK).
+///   - The data ends with the ASTM tail:  … CR  ETX|ETB  CS1 CS2  CR  LF
+///     In that case ETX/ETB is at data[SIZE-5] (= pkt[SIZE-1] from the start of the packet).
 fn receive_message(device: &HidDevice, timeout: Duration, log: &mut PacketLog) -> Result<Message> {
     let deadline = Instant::now() + timeout;
     let mut asm = MessageAssembler::new();
@@ -289,10 +291,10 @@ fn receive_message(device: &HidDevice, timeout: Duration, log: &mut PacketLog) -
     }
 }
 
-/// Reassembles ASTM messages from a stream of 64-byte HID packets.
+/// Joins a stream of 64-byte HID packets into ASTM messages.
 ///
-/// Held separate from the device so `--from-bytes` replays a capture through
-/// exactly the framing rules it was read with — one decoder, not two.
+/// This is separate from the device. So `--from-bytes` replays a capture with
+/// the same framing rules that read it. There is one decoder, not two.
 struct MessageAssembler {
     buf: Vec<u8>,
 }
@@ -341,10 +343,10 @@ fn decode_message(buf: &[u8]) -> Result<Message> {
     let msg_type = *buf.first().ok_or_else(|| anyhow!("Empty message buffer"))?;
 
     if msg_type != STX {
-        // When a session starts on the heels of a previous one, the meter
-        // packs EOT+ENQ into a single packet: it terminates the stale
-        // session and immediately offers a new one. Surface the ENQ so the
-        // handshake continues instead of treating it as end of transmission.
+        // If a session starts right after a previous one, the meter sends
+        // EOT+ENQ in one packet. It ends the old session and offers a new one.
+        // We return the ENQ so the handshake goes on. Otherwise we would
+        // treat it as the end of the transmission.
         let msg_type = if buf == [EOT, ENQ] { ENQ } else { msg_type };
         return Ok(Message {
             msg_type,
@@ -372,8 +374,8 @@ fn decode_message(buf: &[u8]) -> Result<Message> {
         ));
     }
 
-    // Frame content is buf[2..len-4] — includes the trailing CR+ETX/ETB.
-    // Strip them so callers just see the record text.
+    // Frame content is buf[2..len-4]. It includes the trailing CR and ETX/ETB.
+    // We remove them so callers see only the record text.
     let content = &buf[2..buf.len() - 4];
     let content = match content {
         [rest @ .., ETX | ETB] => rest,
@@ -454,20 +456,20 @@ fn parse_header(frame: &str) -> Result<DeviceInfo> {
     })
 }
 
-/// Extract the serial number from the raw field.
+/// Get the serial number from the raw field.
 /// "7830H5001733" → "5001733",  "6301-1C2CF8C" → "1C2CF8C"
-/// Matches JS regex /^\d+[\w-]\s*(\w+)/ — skip leading digits + one separator char.
+/// Same as the JS regex /^\d+[\w-]\s*(\w+)/: skip the leading digits and one separator character.
 fn parse_serial(raw: &str) -> String {
     let after_digits = raw.trim_start_matches(|c: char| c.is_ascii_digit());
-    // Skip exactly one separator character
+    // Skip exactly one separator character.
     match after_digits.chars().next() {
         Some(sep) => after_digits[sep.len_utf8()..].trim_start().to_string(),
         None => raw.to_string(),
     }
 }
 
-/// Parse the config field (field[5]) for thresholds and units.
-/// Config looks like:  A=1^C=00^I=0200^R=0^S=01^U=0^V=20600^X=...
+/// Read the thresholds and units from the config field (field[5]).
+/// The config looks like this:  A=1^C=00^I=0200^R=0^S=01^U=0^V=20600^X=...
 fn parse_thresholds(config: &str) -> (u32, u32) {
     let mut low = DEFAULT_LOW_THRESHOLD;
     let mut high = DEFAULT_HIGH_THRESHOLD;
@@ -475,7 +477,7 @@ fn parse_thresholds(config: &str) -> (u32, u32) {
 
     for part in config.split('^') {
         if let Some(val) = part.strip_prefix("V=") {
-            // V=LLOHHH  (LL = 2-digit low, HHH = 3-digit high)
+            // V=LLHHH: LL is the 2-digit low limit, HHH is the 3-digit high limit.
             low = val
                 .get(..2)
                 .and_then(|s| s.parse().ok())
@@ -490,7 +492,7 @@ fn parse_thresholds(config: &str) -> (u32, u32) {
     }
 
     if mmol {
-        // Values were in mmol/L × 10; convert to mg/dL
+        // The values are mmol/L × 10. Convert them to mg/dL.
         low = ((low as f64 / 10.0) * MMOL_TO_MGDL).round() as u32;
         high = ((high as f64 / 10.0) * MMOL_TO_MGDL).round() as u32;
     }
@@ -588,9 +590,9 @@ const CAPTURE_VERSION: u8 = 1;
 /// magic + version + packet size.
 const CAPTURE_HEADER_LEN: usize = CAPTURE_MAGIC.len() + 2;
 
-/// Serialise a packet log: a 9-byte header, then one direction byte plus the
-/// raw packet per entry. The stride is fixed and recorded in the header, so a
-/// truncated file is detectable rather than silently short.
+/// Write a packet log. It starts with a 9-byte header. Then each entry is one
+/// direction byte plus the raw packet. The entry size is fixed and stored in
+/// the header. So we can detect a truncated file instead of reading it as a short one.
 pub fn encode_packets(packets: &[Packet]) -> Vec<u8> {
     let stride = 1 + HID_PACKET_SIZE;
     let mut out = Vec::with_capacity(CAPTURE_HEADER_LEN + packets.len() * stride);
@@ -607,8 +609,8 @@ pub fn encode_packets(packets: &[Packet]) -> Vec<u8> {
     out
 }
 
-/// Inverse of [`encode_packets`]. Rejects anything it cannot read exactly —
-/// a half-decoded capture would produce a plausible-looking short reading list.
+/// The reverse of [`encode_packets`]. It rejects anything it cannot read
+/// exactly. A half-decoded capture would give a short reading list that looks valid.
 pub fn decode_packets(bytes: &[u8]) -> Result<Vec<Packet>> {
     let header = bytes
         .get(..CAPTURE_HEADER_LEN)
@@ -1011,13 +1013,13 @@ mod tests {
 
     #[test]
     fn checksum_single_byte() {
-        // sum of one byte is that byte; 0x06 % 256 = 6 → "06"
+        // The sum of one byte is that byte. 0x06 % 256 = 6, so the result is "06"
         assert_eq!(compute_checksum(&[0x06]), "06");
     }
 
     #[test]
     fn checksum_overflow_wraps() {
-        // 255 + 2 = 257 % 256 = 1 → "01"
+        // 255 + 2 = 257, and 257 % 256 = 1, so the result is "01"
         assert_eq!(compute_checksum(&[0xFF, 0x02]), "01");
     }
 
@@ -1059,9 +1061,9 @@ mod tests {
         assert!(decode_message(&[]).is_err());
     }
 
-    /// Observed on a real Contour Next One: a session started right after a
-    /// previous one gets EOT+ENQ in one packet — stale session terminated,
-    /// new one offered. The ENQ must win or the session ends empty.
+    /// Seen on a real Contour Next One. If a session starts right after a
+    /// previous one, the meter sends EOT+ENQ in one packet. This ends the old
+    /// session and offers a new one. We must return the ENQ, or the session ends empty.
     #[test]
     fn decode_eot_enq_pair_surfaces_enq() {
         let msg = decode_message(&[EOT, ENQ]).unwrap();
@@ -1083,7 +1085,7 @@ mod tests {
 
     #[test]
     fn timestamp_ignores_trailing_garbage() {
-        // ETB or other trailing bytes sometimes leak through; only digits are taken
+        // ETB or other trailing bytes sometimes get through. We take only the digits.
         assert_eq!(parse_timestamp("201505261150\r\x17"), "2015-05-26T11:50:00");
     }
 
@@ -1112,8 +1114,8 @@ mod tests {
 
     #[test]
     fn thresholds_mmol_converts_to_mg_dl() {
-        // U=1 means mmol/L; V=02033 → lo=2 mmol/L×10=2, hi=033 mmol/L×10=3.3
-        // 2/10 * 18.01559 ≈ 4,  3.3/10 * 18.01559 ≈ 59
+        // U=1 means mmol/L. V=02033 means low 0.2 mmol/L and high 3.3 mmol/L.
+        // After the factor 18.01559 these are about 4 and 59 mg/dL.
         let (lo, hi) = parse_thresholds("U=1^V=02033");
         assert_eq!(lo, 4);
         assert_eq!(hi, 59);
@@ -1121,8 +1123,8 @@ mod tests {
 
     #[test]
     fn thresholds_multibyte_utf8_does_not_panic() {
-        // Crafted device/file input with a multibyte char in the V field used to
-        // panic on a non-char-boundary byte slice.
+        // A multibyte character in the V field used to cause a panic.
+        // The code sliced the string in the middle of a character.
         let (lo, hi) = parse_thresholds("A=1^U=0^V=aé34");
         assert_eq!(lo, 20);
         assert_eq!(hi, 600);
@@ -1274,7 +1276,7 @@ mod tests {
 
     #[test]
     fn header_parses_correctly() {
-        // Minimal but valid H record with 14 pipe-delimited fields
+        // A short but valid H record with 14 fields, split by `|`.
         let frame = "H|\\^&|||Bayer7350^fw^7358-1611135|A=1^U=0^V=20600|4|||||P|1|201505291248";
         let info = parse_header(frame).unwrap();
         assert_eq!(info.model, "Bayer7350");
@@ -1314,12 +1316,11 @@ mod tests {
 
     // ── Tests grounded in the real Contour Next One capture ───────────────────
     //
-    // All personally-identifying values (serial, timestamps, glucose readings)
-    // have been replaced with synthetic equivalents. The structural patterns —
-    // serial format, config string layout, annotation variants — are taken
-    // directly from the capture.
+    // All personal values (serial, timestamps, glucose readings) are replaced
+    // with made-up ones. The structure comes straight from the capture: the
+    // serial format, the config string layout and the annotation variants.
 
-    /// Real device serial format: leading model digits + uppercase letter separator.
+    /// Real device serial format: leading model digits, then one uppercase letter as a separator.
     /// "7802H7001396" → strip "7802" + "H" → "7001396"
     #[test]
     fn serial_real_device_format() {
@@ -1327,8 +1328,8 @@ mod tests {
     }
 
     /// Real device config string: U=1 (mmol/L), V=06333.
-    /// V field: low = "06" / 10 = 0.6 mmol/L, high = "333" / 10 = 33.3 mmol/L.
-    /// Converted to mg/dL: 0.6 × 18.01559 ≈ 11, 33.3 × 18.01559 ≈ 600.
+    /// In the V field, low = "06" / 10 = 0.6 mmol/L and high = "333" / 10 = 33.3 mmol/L.
+    /// In mg/dL: 0.6 × 18.01559 ≈ 11 and 33.3 × 18.01559 ≈ 600.
     #[test]
     fn thresholds_real_device_config() {
         let config = "A=1^C=6^R=0^S=1^U=1^V=06333^X=039039100072^a=1^J=0";
@@ -1337,7 +1338,7 @@ mod tests {
         assert_eq!(hi, 600);
     }
 
-    /// The most common annotation in the real data — no meal or time context.
+    /// The most common annotation in the real data. It has no meal or time context.
     #[test]
     fn result_t0m0_no_meal_marker() {
         let r = parse_r("R|1|^^^Glucose|7.4|mmol/L^P||T0/M0||20200101090000");
@@ -1347,8 +1348,8 @@ mod tests {
         assert!(!r.is_control);
     }
 
-    /// The "A/T0/M0" annotation observed in the real data (post-meal flagged
-    /// on the meter). The leading 'A' encodes post-meal; the rest is discarded.
+    /// The "A/T0/M0" annotation seen in the real data (post-meal set on the
+    /// meter). The leading 'A' means post-meal. The rest is ignored.
     #[test]
     fn result_a_t0m0_is_postmeal() {
         let r = parse_r("R|354|^^^Glucose|7.9|mmol/L^P||A/T0/M0||20200101180000");
@@ -1357,11 +1358,11 @@ mod tests {
         assert!(!r.low);
     }
 
-    /// H record with the real device's structure: password in field[3],
-    /// 14-digit timestamp, trailing empty field (15 total), U=1, V=06333.
+    /// H record with the structure of the real device: password in field[3],
+    /// 14-digit timestamp, an empty last field (15 fields in total), U=1, V=06333.
     #[test]
     fn header_real_device_structure() {
-        // Sanitised: fake password, fake serial, fake timestamp, synthetic values.
+        // Cleaned: fake password, fake serial, fake timestamp, made-up values.
         let frame = "H|\\^&||AAAAAA|ContourTest^01.00\\01.00\\01.00^0000X0000000|\
                      A=1^C=6^R=0^S=1^U=1^V=06333^X=039039100072^a=1^J=0|\
                      800|||||P|1|20200101090000|";
@@ -1370,7 +1371,7 @@ mod tests {
         assert_eq!(info.serial_number, "0000000");
         assert_eq!(info.record_count, 800);
         assert_eq!(info.device_time, "2020-01-01T09:00:00");
-        // U=1, V=06333 → low ≈ 11 mg/dL, high ≈ 600 mg/dL
+        // U=1, V=06333 gives low ≈ 11 mg/dL and high ≈ 600 mg/dL.
         assert_eq!(info.low_threshold, 11);
         assert_eq!(info.high_threshold, 600);
     }
@@ -1412,7 +1413,7 @@ mod tests {
     #[test]
     fn fixture_postmeal_annotation() {
         let (_, readings) = parse_records_from_text(FIXTURE);
-        // R|4 has A/T0/M0
+        // R|4 has A/T0/M0.
         let r = &readings[3];
         assert_eq!(r.meal_marker, Some("post-meal".to_string()));
     }
