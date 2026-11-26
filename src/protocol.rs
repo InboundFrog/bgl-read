@@ -187,8 +187,15 @@ pub fn open_device(api: &HidApi) -> Result<HidDevice> {
 
 // ── Low-level HID I/O ─────────────────────────────────────────────────────────
 
+/// Position of the size byte in a 64-byte packet.
+const PKT_SIZE_OFFSET: usize = 3;
+/// Position of the first data byte in a 64-byte packet.
+const PKT_DATA_OFFSET: usize = 4;
+/// A write buffer is one byte longer than a packet. The extra byte is the report ID.
+const WRITE_PACKET_SIZE: usize = HID_PACKET_SIZE + 1;
+
 /// Build a 65-byte write buffer (report-ID + 64 payload bytes).
-fn build_write_packet(data: &[u8]) -> [u8; 65] {
+fn build_write_packet(data: &[u8]) -> [u8; WRITE_PACKET_SIZE] {
     debug_assert!(
         data.len() <= MAX_PAYLOAD,
         "write payload {} exceeds MAX_PAYLOAD {}",
@@ -196,9 +203,10 @@ fn build_write_packet(data: &[u8]) -> [u8; 65] {
         MAX_PAYLOAD
     );
     // Layout: [report_id=0, hdr0=0, hdr1=0, hdr2=0, length, data..., padding]
-    let mut pkt = [0u8; 65];
-    pkt[4] = data.len() as u8;
-    pkt[5..5 + data.len()].copy_from_slice(data);
+    let mut pkt = [0u8; WRITE_PACKET_SIZE];
+    // The report ID shifts every offset by one.
+    pkt[PKT_SIZE_OFFSET + 1] = data.len() as u8;
+    pkt[PKT_DATA_OFFSET + 1..PKT_DATA_OFFSET + 1 + data.len()].copy_from_slice(data);
     pkt
 }
 
@@ -227,7 +235,8 @@ impl PacketLog {
 fn hid_write(device: &HidDevice, data: &[u8], log: &mut PacketLog) -> Result<()> {
     let pkt = build_write_packet(data);
     // Log without the report-ID byte
-    let tx_data: [u8; HID_PACKET_SIZE] = pkt[1..].try_into().expect("pkt is 65 bytes");
+    let tx_data: [u8; HID_PACKET_SIZE] =
+        pkt[1..].try_into().expect("pkt is WRITE_PACKET_SIZE bytes");
     log.push(Packet {
         dir: Dir::Tx,
         data: tx_data,
@@ -305,9 +314,9 @@ impl MessageAssembler {
     /// Feed one packet. Returns `Some` once the accumulated bytes form a
     /// complete message, resetting for the next one.
     fn push(&mut self, pkt: &[u8; HID_PACKET_SIZE]) -> Option<Result<Message>> {
-        let size = pkt[3] as usize;
-        let data_end = (4 + size).min(HID_PACKET_SIZE);
-        self.buf.extend_from_slice(&pkt[4..data_end]);
+        let size = pkt[PKT_SIZE_OFFSET] as usize;
+        let data_end = (PKT_DATA_OFFSET + size).min(HID_PACKET_SIZE);
+        self.buf.extend_from_slice(&pkt[PKT_DATA_OFFSET..data_end]);
 
         if self.buf.len() > MAX_MESSAGE_SIZE {
             self.buf.clear();
@@ -1434,8 +1443,8 @@ mod tests {
     fn packet(dir: Dir, data: &[u8]) -> Packet {
         assert!(data.len() <= MAX_PAYLOAD, "payload too big for one packet");
         let mut buf = [0u8; HID_PACKET_SIZE];
-        buf[3] = data.len() as u8;
-        buf[4..4 + data.len()].copy_from_slice(data);
+        buf[PKT_SIZE_OFFSET] = data.len() as u8;
+        buf[PKT_DATA_OFFSET..PKT_DATA_OFFSET + data.len()].copy_from_slice(data);
         Packet { dir, data: buf }
     }
 
