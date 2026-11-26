@@ -996,8 +996,10 @@ impl SessionBuilder {
             let total = self.device.record_count;
             let n = self.readings.len() + 1;
             let pct = (100 * n as u32).checked_div(total).unwrap_or(0);
-            eprint!(
-                "\r[{n:>3}/{total}] {pct:>3}%  {}  {:.1} {}  {}{}",
+            // Pad to a fixed width so a shorter line fully covers the last one.
+            // Format to a String first: escape_debug() ignores width.
+            let line = format!(
+                "[{n:>3}/{total}] {pct:>3}%  {}  {:.1} {}  {}{}",
                 r.timestamp.escape_debug(),
                 r.value,
                 r.units.escape_debug(),
@@ -1010,6 +1012,7 @@ impl SessionBuilder {
                 },
                 r.meal_marker.as_deref().unwrap_or(""),
             );
+            eprint!("\r{line:<80}");
             let _ = std::io::stderr().flush();
         }
         self.readings.push(r);
