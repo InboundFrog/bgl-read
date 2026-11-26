@@ -176,11 +176,28 @@ pub fn list_devices(api: &HidApi) {
 }
 
 pub fn open_device(api: &HidApi) -> Result<HidDevice> {
-    for (pid, name) in SUPPORTED_DEVICES {
-        if let Ok(dev) = api.open(VENDOR_ID, *pid) {
-            eprintln!("Opened: {name}");
-            return Ok(dev);
+    let mut last_error = None;
+    for info in api.device_list() {
+        if info.vendor_id() != VENDOR_ID {
+            continue;
         }
+        let Some(name) = product_name(info.product_id()) else {
+            continue;
+        };
+        match info.open_device(api) {
+            Ok(dev) => {
+                eprintln!("Opened: {name}");
+                return Ok(dev);
+            }
+            Err(e) => last_error = Some((name, e)),
+        }
+    }
+    if let Some((name, e)) = last_error {
+        return Err(anyhow!(
+            "Found {name}, but could not open it: {e}\n\
+             Check permissions (macOS: Input Monitoring; Linux: udev rules) \
+             and that no other program is using the meter."
+        ));
     }
     Err(anyhow!(
         "No supported Contour device found — is it plugged in?\n\
