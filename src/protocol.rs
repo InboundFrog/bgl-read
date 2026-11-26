@@ -516,8 +516,15 @@ fn parse_result_record(frame: &str) -> Result<Record> {
         return Ok(Record::Skip);
     }
 
-    let record_number: u32 = fields[1].parse().unwrap_or(0);
-    let value: f64 = fields[3].parse().unwrap_or(0.0);
+    // A bad number must be an error. Using a default would invent a reading.
+    let record_number: u32 = fields[1]
+        .trim()
+        .parse()
+        .map_err(|_| anyhow!("bad record number in R record: {frame:?}"))?;
+    let value: f64 = match fields[3].trim().parse::<f64>() {
+        Ok(v) if v.is_finite() && v >= 0.0 => v,
+        _ => return Err(anyhow!("unreadable value in R record: {frame:?}")),
+    };
     let units = fields[4].split('^').next().unwrap_or("mg/dL").to_string();
 
     // fields[6] is the annotation / marker field, e.g. "A/M0/T1", ">", "C"
@@ -1285,6 +1292,20 @@ mod tests {
     fn result_control_flagged() {
         let r = parse_r("R|7|^^^Glucose|100|mg/dL^P||C||201505261220");
         assert!(r.is_control);
+    }
+
+    #[test]
+    fn result_unreadable_value_is_error() {
+        for v in ["HI", "", "NaN", "inf", "-1"] {
+            let frame = format!("R|1|^^^Glucose|{v}|mg/dL^P||A/M0/T1||201505261150");
+            assert!(parse_result_record(&frame).is_err(), "value {v:?}");
+        }
+    }
+
+    #[test]
+    fn result_bad_record_number_is_error() {
+        let frame = "R|x|^^^Glucose|93|mg/dL^P||A/M0/T1||201505261150";
+        assert!(parse_result_record(frame).is_err());
     }
 
     // ── parse_header ──────────────────────────────────────────────────────────
