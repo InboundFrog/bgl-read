@@ -724,16 +724,6 @@ pub fn session_from_packets(mut packets: Vec<Packet>) -> Result<Session> {
 
 // ── Text-format round-trip ────────────────────────────────────────────────────
 
-/// Parse a `--format records` text dump (one ASTM frame per line) back into
-/// structured data.  Lines that cannot be parsed are silently skipped.
-/// Thin wrapper over [`session_from_records_text`]; currently exercised only
-/// by tests, hence the dead-code allowance for non-test builds.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn parse_records_from_text(text: &str) -> (DeviceInfo, Vec<Reading>) {
-    let session = session_from_records_text(text);
-    (session.device, session.readings)
-}
-
 /// Build a Session from a saved `--format records` text dump in a single pass:
 /// every trimmed non-empty line is kept verbatim in `raw_records`, and lines
 /// that parse contribute to `device`/`readings`.
@@ -1654,6 +1644,12 @@ mod tests {
     fn empty_capture_is_an_error_not_an_empty_session() {
         let err = session_from_packets(vec![packet(Dir::Rx, &[EOT])]).unwrap_err();
         assert!(err.to_string().contains("no records"), "got: {err}");
+    }
+
+    /// Parse a records text dump and return only the device and readings.
+    fn parse_records_from_text(text: &str) -> (DeviceInfo, Vec<Reading>) {
+        let session = session_from_records_text(text);
+        (session.device, session.readings)
     }
 
     /// Packets for the fixture records without the final L record.
