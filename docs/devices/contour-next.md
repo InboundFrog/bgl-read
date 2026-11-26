@@ -110,9 +110,13 @@ meter → host   [frame] R record  (first glucose reading)
 host → meter   ACK
   … repeats for each reading …
 meter → host   [frame] L record  (terminator)
-host → meter   ACK
+host → meter   ACK               (the meter does not reply)
+host → meter   NAK
 meter → host   EOT
 ```
+
+A meter can send `EOT` and `ENQ` together in one packet when a new session
+starts right after an old one. `bgl-read` treats that packet as `ENQ`.
 
 **Contour Next One quirk:** this model does not send an `ACK` in response to the
 host's initial `ACK`, and does not expect an `EOT` command before the `NAK`
@@ -142,7 +146,7 @@ Fields of interest (0-indexed):
 | Index | Example | Description |
 |---|---|---|
 | 4 | `Contour7800^FW^7830H5001733^` | `^`-delimited device info |
-| 4[0] | `Contour7800` | Model code (maps to human name via lookup table) |
+| 4[0] | `Contour7800` | Model code (`bgl-read` reports it as received; see the table below) |
 | 4[2] | `7830H5001733` | Raw serial — strip leading digits + one separator to get `5001733` |
 | 5 | `A=1^U=0^V=20600^…` | `^`-delimited config key=value pairs |
 | 5[U] | `0` | Units: `0` = mg/dL, `1` = mmol/L |
@@ -168,11 +172,11 @@ R|<nrec>|^^^Glucose|<value>|<units>^<method>||<markers>||<timestamp>
 | Value | 3 | `5.4` or `93` | Glucose value (float for mmol/L, integer for mg/dL) |
 | Units | 4 | `mmol/L^P` | Units string before `^`; method after (`P`=plasma, `B`=whole blood, `C`=capillary) |
 | Markers | 6 | `A/M0/T1` | See below |
-| Timestamp | 8 | `202411031245` | 12-digit `YYYYMMDDHHmm`, device local time |
+| Timestamp | 8 | `202411031245` | 12 digits `YYYYMMDDHHmm` or 14 digits `YYYYMMDDHHmmss`, device local time |
 
 #### Marker field
 
-The marker field (index 6) is a slash-separated string. The leading character
+The marker field (index 6) is a slash-separated string. The first character
 encodes the meal mark:
 
 | Char | Meaning |
@@ -180,6 +184,11 @@ encodes the meal mark:
 | `B` | Pre-meal |
 | `A` | Post-meal |
 | `D` | Logbook |
+
+These flags are matched anywhere in the field:
+
+| Char | Meaning |
+|---|---|
 | `>` | Above high threshold |
 | `<` | Below low threshold |
 | `C` | Control solution test (discard — not a patient reading) |
@@ -201,8 +210,9 @@ needed. `bgl-read` preserves timestamps as-is (`YYYY-MM-DDTHH:MM:SS` local).
 
 ## Model code lookup
 
-The model string in the H record (e.g. `Contour7800`) maps to a human-readable
-name:
+The model string in the H record (e.g. `Contour7800`) identifies the model.
+`bgl-read` has no lookup for it and reports the code as received. This table is
+for reference only:
 
 | Code | Name |
 |---|---|
@@ -226,6 +236,9 @@ The `V` value encodes thresholds in the device's *native display units*:
   `V=20600` → low = 20 mg/dL, high = 600 mg/dL.
 - **mmol/L meters (`U=1`):** values are tenths of mmol/L.
   `V=06333` → low = 0.6 mmol/L, high = 33.3 mmol/L.
+
+`bgl-read` always reports `low_threshold` and `high_threshold` in mg/dL. For
+mmol/L meters it converts the values with the factor 18.01559.
 
 These are the full measurable range of the device, not user-configurable alert
 thresholds. Readings that exceed the range are flagged `>` or `<` in the

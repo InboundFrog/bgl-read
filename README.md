@@ -13,7 +13,7 @@ figuring out how to convert the small portion I needed into Rust.
 ## Overview
 
 Reads blood glucose readings from a Bayer/Ascensia Contour Next USB meter and
-outputs them as JSON or CSV.
+outputs them in one of five formats (JSON by default).
 
 Tested against the **Contour Next One** (USB model). Other Contour Next variants
 that use the same ASTM-over-HID protocol should also work — see
