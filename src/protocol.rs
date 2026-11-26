@@ -210,7 +210,7 @@ fn build_write_packet(data: &[u8]) -> [u8; WRITE_PACKET_SIZE] {
     pkt
 }
 
-/// Captures HID packets for `--format bytes`. When `capture` is false,
+/// Keeps HID packets for `--format bytes` and `--format binary`. When `capture` is false,
 /// `push` is a no-op and no allocations happen beyond the empty Vec itself.
 struct PacketLog {
     packets: Vec<Packet>,
