@@ -11,14 +11,14 @@
 | Contour Next Link | `0x1A79` | `0x6220` | Untested |
 | Contour Next Link 2.4 | `0x1A79` | `0x6230` | Untested |
 
-The device presents as a USB HID device (same class as keyboards/mice), not a
-CDC serial port or bulk-transfer device.
+The device shows up as a USB HID device. This is the same class as keyboards
+and mice. It is not a CDC serial port or a bulk-transfer device.
 
 ---
 
 ## Transport: HID packets
 
-Communication uses 64-byte HID reports.
+The meter and host exchange 64-byte HID reports.
 
 ### Received packets (meter → host)
 
@@ -39,18 +39,19 @@ byte  5..   payload bytes
 remainder   zero padding to 65 bytes total
 ```
 
-A packet is complete (no more HID reads needed) when any of the following is true:
+A packet is complete when any of the following is true. The host then needs no
+more HID reads.
 
-- `SIZE < 60` (partial / last packet of a multi-packet frame)
+- `SIZE < 60` (the last packet of a multi-packet frame)
 - First data byte is a single-byte control character (ENQ, EOT, ACK, NAK)
-- `data[SIZE - 5]` is `ETX` or `ETB` (end of ASTM frame — see below)
+- `data[SIZE - 5]` is `ETX` or `ETB` (the end of an ASTM frame; see below)
 
 ---
 
 ## ASTM framing
 
-The meter speaks **ASTM E1381 Minimum Protocol** — a simple framed
-request/response protocol originally designed for laboratory instruments.
+The meter speaks **ASTM E1381 Minimum Protocol**. This is a simple framed
+request/response protocol. It was first made for laboratory instruments.
 
 ### Frame structure
 
@@ -60,21 +61,21 @@ STX  seq  record_text  CR  ETX|ETB  CS1  CS2  CR  LF
 
 | Field | Size | Description |
 |---|---|---|
-| `STX` | 1 byte | `0x02` — marks start of frame |
+| `STX` | 1 byte | `0x02`, marks the start of a frame |
 | `seq` | 1 byte | ASCII digit `'0'`–`'7'`, frame sequence number |
 | `record_text` | variable | Pipe-delimited ASTM record (see below) |
 | `CR` | 1 byte | `0x0D` |
-| `ETX` or `ETB` | 1 byte | `0x03` end of final frame / `0x17` end of intermediate frame |
+| `ETX` or `ETB` | 1 byte | `0x03` ends the final frame; `0x17` ends an intermediate frame |
 | `CS1 CS2` | 2 bytes | Checksum as two uppercase ASCII hex digits |
 | `CR LF` | 2 bytes | `0x0D 0x0A` |
 
-`ETB` is used when a logical record spans multiple physical frames (uncommon in
-practice for these meters). `ETX` marks the final frame of a record.
+The meter uses `ETB` when one record needs several physical frames. This is
+rare for these meters. `ETX` marks the final frame of a record.
 
 ### Checksum
 
-Sum of all bytes from `seq` through `ETX`/`ETB` (inclusive), modulo 256,
-formatted as two uppercase hex digits:
+Add all bytes from `seq` through `ETX`/`ETB` (inclusive). Take the sum modulo
+256. Write it as two uppercase hex digits:
 
 ```
 checksum = format!("{:02X}", bytes[seq..=frame_end].iter().sum::<u32>() % 256)
@@ -82,25 +83,25 @@ checksum = format!("{:02X}", bytes[seq..=frame_end].iter().sum::<u32>() % 256)
 
 ### Single-byte control messages
 
-Some messages are a single control byte with no framing:
+Some messages are one control byte with no framing:
 
 | Byte | Hex | Meaning |
 |---|---|---|
-| `ENQ` | `0x05` | Meter signalling it is ready to send data |
+| `ENQ` | `0x05` | The meter is ready to send data |
 | `EOT` | `0x04` | End of transmission |
 | `ACK` | `0x06` | Acknowledge |
-| `NAK` | `0x15` | Not acknowledge — request retransmit |
+| `NAK` | `0x15` | Not acknowledge; asks the meter to send again |
 
 ---
 
 ## Session flow
 
-The host drives the session by sending `ACK` after each record. The meter
-responds with the next record. Retransmit is requested by sending `NAK` instead.
+The host sends `ACK` after each record. The meter then sends the next record.
+To ask for a retransmit, the host sends `NAK` instead.
 
 ```
-host → meter   ACK               (wake / signal readiness)
-meter → host   ENQ               (meter announcing it has data)
+host → meter   ACK               (wakes the meter and shows the host is ready)
+meter → host   ENQ               (the meter says it has data)
 host → meter   ACK
 meter → host   [frame] H record  (session header)
 host → meter   ACK
@@ -118,10 +119,10 @@ meter → host   EOT
 A meter can send `EOT` and `ENQ` together in one packet when a new session
 starts right after an old one. `bgl-read` treats that packet as `ENQ`.
 
-**Contour Next One quirk:** this model does not send an `ACK` in response to the
-host's initial `ACK`, and does not expect an `EOT` command before the `NAK`
-phase used for date/time setting. Other models differ — see the original
-[Tidepool driver source][driver] for per-model branches.
+**Contour Next One quirk:** this model does not reply with an `ACK` to the
+host's first `ACK`. It does not expect an `EOT` command before the `NAK` phase
+that sets the date and time. Other models differ. See the original
+[Tidepool driver source][driver] for the branch of each model.
 
 [driver]: https://github.com/tidepool-org/uploader/blob/master/lib/drivers/bayer/bayerContourNext.js
 
@@ -129,38 +130,38 @@ phase used for date/time setting. Other models differ — see the original
 
 ## Record types
 
-All records use pipe (`|`) as a field delimiter. The first field is always the
-record type character.
+All records use the pipe (`|`) as the field delimiter. The first field is
+always the record type character.
 
 ### H — Header
 
-Sent once at the start of a session. Contains device identification and
-configuration.
+The meter sends this once at the start of a session. It has the device
+identification and configuration.
 
 ```
 H|\^&||<mid>|<device>|<config>|<nrecs>|||||P|1|<timestamp>
 ```
 
-Fields of interest (0-indexed):
+These fields matter most (0-indexed):
 
 | Index | Example | Description |
 |---|---|---|
-| 4 | `Contour7800^FW^7830H5001733^` | `^`-delimited device info |
+| 4 | `Contour7800^FW^7830H5001733^` | Device info, delimited by `^` |
 | 4[0] | `Contour7800` | Model code (`bgl-read` reports it as received; see the table below) |
-| 4[2] | `7830H5001733` | Raw serial — strip leading digits + one separator to get `5001733` |
-| 5 | `A=1^U=0^V=20600^…` | `^`-delimited config key=value pairs |
+| 4[2] | `7830H5001733` | Raw serial. Remove the leading digits and one separator to get `5001733` |
+| 5 | `A=1^U=0^V=20600^…` | Config key=value pairs, delimited by `^` |
 | 5[U] | `0` | Units: `0` = mg/dL, `1` = mmol/L |
-| 5[V] | `20600` | Thresholds: first 2 digits = low (20), next 3 = high (600), in display units |
+| 5[V] | `20600` | Thresholds. The first 2 digits are the low value (20). The next 3 are the high value (600). Both use display units |
 | 6 | `150` | Number of records that follow |
 | 13 | `202411031245` | Device clock at session start (`YYYYMMDDHHmm` or `YYYYMMDDHHmmss`) |
 
 ### P — Patient
 
-Sent after the header. Typically empty; can be ignored.
+The meter sends this after the header. It is usually empty. You can ignore it.
 
 ### R — Result (glucose reading)
 
-One per stored reading, in chronological order.
+The meter sends one for each stored reading, in time order.
 
 ```
 R|<nrec>|^^^Glucose|<value>|<units>^<method>||<markers>||<timestamp>
@@ -168,16 +169,16 @@ R|<nrec>|^^^Glucose|<value>|<units>^<method>||<markers>||<timestamp>
 
 | Field | Index | Example | Description |
 |---|---|---|---|
-| Record seq | 1 | `3` | Position in this session (not a persistent ID) |
-| Value | 3 | `5.4` or `93` | Glucose value (float for mmol/L, integer for mg/dL) |
-| Units | 4 | `mmol/L^P` | Units string before `^`; method after (`P`=plasma, `B`=whole blood, `C`=capillary) |
+| Record seq | 1 | `3` | Position in this session (not a lasting ID) |
+| Value | 3 | `5.4` or `93` | Glucose value (decimal for mmol/L, whole number for mg/dL) |
+| Units | 4 | `mmol/L^P` | Units string before `^`; method after it (`P`=plasma, `B`=whole blood, `C`=capillary) |
 | Markers | 6 | `A/M0/T1` | See below |
 | Timestamp | 8 | `202411031245` | 12 digits `YYYYMMDDHHmm` or 14 digits `YYYYMMDDHHmmss`, device local time |
 
 #### Marker field
 
-The marker field (index 6) is a slash-separated string. The first character
-encodes the meal mark:
+The marker field (index 6) is a string split by slashes. The first character
+is the meal mark:
 
 | Char | Meaning |
 |---|---|
@@ -185,7 +186,7 @@ encodes the meal mark:
 | `A` | Post-meal |
 | `D` | Logbook |
 
-These flags are matched anywhere in the field:
+`bgl-read` looks for these flags anywhere in the field:
 
 | Char | Meaning |
 |---|---|
@@ -195,16 +196,17 @@ These flags are matched anywhere in the field:
 
 ### L — Terminator
 
-Sent after all R records. Signals that the data set is complete and valid. If
-the session ends without an L record, the data should be considered incomplete.
+The meter sends this after all R records. It shows that the data set is
+complete and valid. If the session ends without an L record, treat the data as
+incomplete.
 
 ---
 
 ## Device time
 
-The meter has no concept of timezone. All timestamps are in the user's local
-time as set on the device. The host must apply a timezone offset if UTC is
-needed. `bgl-read` preserves timestamps as-is (`YYYY-MM-DDTHH:MM:SS` local).
+The meter does not know about timezones. All timestamps use the local time set
+on the device. If you need UTC, the host must apply a timezone offset.
+`bgl-read` keeps timestamps as they are (`YYYY-MM-DDTHH:MM:SS` local).
 
 ---
 
@@ -224,43 +226,43 @@ for reference only:
 | `Contour6210` | Contour Next Link 2.4 |
 | `Contour7390` | Contour USB |
 
-The prefix may be `Bayer` instead of `Contour` on older firmware.
+Older firmware may use the prefix `Bayer` instead of `Contour`.
 
 ---
 
 ## V= threshold field — units detail
 
-The `V` value encodes thresholds in the device's *native display units*:
+The `V` value holds thresholds in the device's *own display units*:
 
-- **mg/dL meters (`U=0`):** values are direct integers.
+- **mg/dL meters (`U=0`):** the values are whole numbers.
   `V=20600` → low = 20 mg/dL, high = 600 mg/dL.
-- **mmol/L meters (`U=1`):** values are tenths of mmol/L.
+- **mmol/L meters (`U=1`):** the values are tenths of mmol/L.
   `V=06333` → low = 0.6 mmol/L, high = 33.3 mmol/L.
 
 `bgl-read` always reports `low_threshold` and `high_threshold` in mg/dL. For
 mmol/L meters it converts the values with the factor 18.01559.
 
-These are the full measurable range of the device, not user-configurable alert
-thresholds. Readings that exceed the range are flagged `>` or `<` in the
-marker field.
+These values are the full measurable range of the device. The user cannot
+change them, and they are not alert thresholds. The meter flags readings
+outside the range with `>` or `<` in the marker field.
 
 ---
 
 ## Observed behaviour — Contour Next One (PID `0x7800`, firmware `02.03`)
 
-Verified from USB capture (2026-03-18):
+This comes from a USB capture (2026-03-18):
 
 - Units: **mmol/L** (`U=1`)
-- Threshold config: `V=06333` (0.6–33.3 mmol/L — effectively the full range)
+- Threshold config: `V=06333` (0.6–33.3 mmol/L, which is almost the full range)
 - All frames terminated with **ETB** (`0x17`), never ETX
-- **H record spans 3 HID packets** (~143 bytes total); all P and R records fit
-  in a single packet
+- The **H record spans 3 HID packets** (about 143 bytes in total). Each P and R
+  record fits in one packet
 - Serial string format: `7802H7001396` → strip `7802` + `H` → serial `7001396`
-- Marker field is almost always `T0/M0` (no context); `A/T0/M0` (post-meal)
-  observed occasionally
-- No `>` or `<` flags seen in 800 readings — consistent with the wide
+- The marker field is almost always `T0/M0` (no context). `A/T0/M0` (post-meal)
+  appears now and then
+- The capture has no `>` or `<` flags in 800 readings. This fits the wide
   threshold range
-- The H record timestamp is **14 digits** (`YYYYMMDDHHmmss`); R record
-  timestamps are also 14 digits for this firmware
-- H record has a **trailing empty field** (15 fields, not 14): the last `|`
-  produces an empty 15th element that can be ignored
+- The H record timestamp has **14 digits** (`YYYYMMDDHHmmss`). R record
+  timestamps also have 14 digits for this firmware
+- The H record has a **trailing empty field** (15 fields, not 14). The last `|`
+  makes an empty 15th element. You can ignore it
