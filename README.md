@@ -133,7 +133,8 @@ connected devices.
   New readings overwrite older ones without a warning. Read the meter often if
   you need the full history.
 - **Control solution** readings (used to check the meter) are found in the
-  annotation field. The tool leaves them out of the output.
+  annotation field. The tool leaves them out of the output and prints how
+  many it left out.
 - `--format records` output is the **raw meter transcript**. The header (`H`)
   line has the meter's **password** and serial number. The dump has every
   reading. The `bytes` and `binary` captures hold the same transcript without
