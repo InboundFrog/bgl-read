@@ -179,13 +179,11 @@ pub fn list_devices(api: &HidApi) {
 
 pub fn open_device(api: &HidApi) -> Result<HidDevice> {
     let mut errors = Vec::new();
-    let mut found = false;
     for &(pid, name) in SUPPORTED_DEVICES {
         for info in api.device_list() {
             if info.vendor_id() != VENDOR_ID || info.product_id() != pid {
                 continue;
             }
-            found = true;
             match info.open_device(api) {
                 Ok(dev) => {
                     eprintln!("Opened: {name}");
@@ -195,7 +193,7 @@ pub fn open_device(api: &HidApi) -> Result<HidDevice> {
             }
         }
     }
-    if found {
+    if !errors.is_empty() {
         return Err(anyhow!(
             "Found a supported device, but could not open it:\n{}\n\
              Check permissions (macOS: Input Monitoring; Linux: udev rules) \
