@@ -199,10 +199,11 @@ mod tests {
         };
         let path = std::env::temp_dir().join(format!("bgl-read-private-{}", std::process::id()));
         let _ = std::fs::remove_file(&path);
-        write(&session, Format::Records, Some(&path)).unwrap();
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-        std::fs::remove_file(&path).unwrap();
-        assert_eq!(mode & 0o077, 0);
+        let written = write(&session, Format::Records, Some(&path));
+        let mode = std::fs::metadata(&path).map(|m| m.permissions().mode());
+        let _ = std::fs::remove_file(&path);
+        written.unwrap();
+        assert_eq!(mode.unwrap() & 0o077, 0);
     }
 
     fn dump(data: &[u8]) -> String {
