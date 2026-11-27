@@ -15,7 +15,8 @@
 //!
 //! ASTM frame structure inside the data bytes:
 //!   STX  seq_digit  record_text  CR  ETX|ETB  CS1  CS2  CR  LF
-//! The checksum covers seq_digit through ETX/ETB (inclusive). It is the sum of those bytes mod 256, in uppercase hex.
+//! The checksum covers seq_digit through ETX/ETB (inclusive).
+//! It is the sum of those bytes mod 256, in uppercase hex.
 
 use anyhow::{Result, anyhow};
 use hidapi::{HidApi, HidDevice};
