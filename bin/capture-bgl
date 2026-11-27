@@ -4,13 +4,30 @@
 # Add 'x' to the options if you want debug output
 set -euo pipefail
 
+# Captures hold health data and the meter password. Keep new files and
+# directories private to this user.
+umask 077
+
 # Don't touch these
 BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 PRJ_DIR="$(cd "${BIN_DIR}/../" > /dev/null 2>&1 && pwd)"
 CAP_DIR="${PRJ_DIR}/captures"
 DATE_CAP=$(date "+%Y%m%d")
 PREFIX="${1:-unknown}"
+
+# The prefix becomes part of file and directory names. Allow only safe
+# characters. No slash, so the prefix cannot change the path. No dot at the
+# start, so the files are not hidden and the final "mv" finds them.
+if [[ ! "${PREFIX}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+  echo "capture-bgl: bad prefix '${PREFIX}'. Start with a letter or digit, then use only letters, digits, '.', '_' and '-'." >&2
+  exit 2
+fi
 OUT_DIR="${CAP_DIR}/${DATE_CAP}"
+
+# Run cargo on this project, whatever the current directory is.
+run_bgl() {
+  cargo run --manifest-path "${PRJ_DIR}/Cargo.toml" -- "$@"
+}
 
 # Ensure the captures directory exists
 mkdir -p "${OUT_DIR}"
@@ -19,16 +36,27 @@ mkdir -p "${OUT_DIR}"
 # at the end is a rename. A failure part-way through then leaves the previous
 # capture untouched instead of mixing fresh files with stale ones.
 WORK_DIR="$(mktemp -d "${OUT_DIR}/.${PREFIX}-XXXXXX")"
-trap 'rm -rf "${WORK_DIR}"' EXIT
+
+# On success, remove the staging directory. On failure, keep it: bgl-read
+# writes a partial packet dump when a read fails, and that dump helps debug.
+cleanup() {
+  local status=$?
+  if [[ ${status} -eq 0 ]]; then
+    rm -rf "${WORK_DIR}"
+  else
+    echo "capture-bgl: failed. Partial files kept in ${WORK_DIR}" >&2
+  fi
+}
+trap cleanup EXIT
 STEM="${WORK_DIR}/${PREFIX}-bgl"
 
 # The only time we touch the meter: capture the raw HID packet stream once.
-cargo run -- --format binary --progress --output "${STEM}.bin"
+run_bgl --format binary --progress --output "${STEM}.bin"
 
 # Every other format is replayed from that capture, offline.
-cargo run -- --from-bytes "${STEM}.bin" --format records --output "${STEM}.txt"
-cargo run -- --from-bytes "${STEM}.bin" --format csv     --output "${STEM}.csv"
-cargo run -- --from-bytes "${STEM}.bin" --format json    --output "${STEM}.json"
-cargo run -- --from-bytes "${STEM}.bin" --format bytes   --output "${STEM}.hex"
+run_bgl --from-bytes "${STEM}.bin" --format records --output "${STEM}.txt"
+run_bgl --from-bytes "${STEM}.bin" --format csv     --output "${STEM}.csv"
+run_bgl --from-bytes "${STEM}.bin" --format json    --output "${STEM}.json"
+run_bgl --from-bytes "${STEM}.bin" --format bytes   --output "${STEM}.hex"
 
 mv "${WORK_DIR}"/* "${OUT_DIR}/"

@@ -37,6 +37,13 @@ pub const SUPPORTED_DEVICES: &[(u16, &str)] = &[
     (0x6230, "Contour Next Link 2.4"),
 ];
 
+fn product_name(pid: u16) -> Option<&'static str> {
+    SUPPORTED_DEVICES
+        .iter()
+        .find(|(p, _)| *p == pid)
+        .map(|(_, n)| *n)
+}
+
 // ── ASTM control bytes ────────────────────────────────────────────────────────
 
 const ACK: u8 = 0x06;
@@ -53,10 +60,10 @@ const CR: u8 = 0x0D;
 const HID_PACKET_SIZE: usize = 64;
 // Maximum data bytes per HID packet = 64 total - 4 overhead (3 header + 1 length byte)
 const MAX_PAYLOAD: usize = HID_PACKET_SIZE - 4;
-/// Transient I/O retries (receive_message returned Err).
-const IO_RETRIES: u32 = 6;
-/// Protocol-violation retries (unexpected message type or parse failure).
-const PROTO_RETRIES: u32 = 6;
+/// Most passes of the receive loop that may end without a record.
+/// Receive errors, parse errors, unexpected bytes, ENQ and ACK all count.
+/// A normal start needs one or two passes, so 6 leaves room.
+const MAX_RETRIES: u32 = 6;
 const RECEIVE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long to wait for the meter's EOT reply when closing with a NAK.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -115,7 +122,7 @@ pub struct Reading {
 }
 
 /// Direction of a captured HID packet.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dir {
     Tx,
     Rx,
@@ -131,14 +138,14 @@ impl fmt::Display for Dir {
 }
 
 /// One captured HID packet (raw 64 bytes + direction).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Packet {
     pub dir: Dir,
     pub data: [u8; HID_PACKET_SIZE],
 }
 
 /// Everything captured during a session.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Session {
     pub device: DeviceInfo,
     pub readings: Vec<Reading>,
@@ -157,16 +164,12 @@ pub fn list_devices(api: &HidApi) {
             continue;
         }
         found = true;
-        let name = SUPPORTED_DEVICES
-            .iter()
-            .find(|(pid, _)| *pid == dev.product_id())
-            .map(|(_, n)| *n)
-            .unwrap_or("Unknown Contour device");
+        let name = product_name(dev.product_id()).unwrap_or("Unknown Contour device");
         println!(
             "{name}  VID={:#06x}  PID={:#06x}  S/N={}",
             dev.vendor_id(),
             dev.product_id(),
-            dev.serial_number().unwrap_or("")
+            dev.serial_number().unwrap_or("").escape_debug()
         );
     }
     if !found {
@@ -175,11 +178,28 @@ pub fn list_devices(api: &HidApi) {
 }
 
 pub fn open_device(api: &HidApi) -> Result<HidDevice> {
-    for (pid, name) in SUPPORTED_DEVICES {
-        if let Ok(dev) = api.open(VENDOR_ID, *pid) {
-            eprintln!("Opened: {name}");
-            return Ok(dev);
+    let mut last_error = None;
+    for info in api.device_list() {
+        if info.vendor_id() != VENDOR_ID {
+            continue;
         }
+        let Some(name) = product_name(info.product_id()) else {
+            continue;
+        };
+        match info.open_device(api) {
+            Ok(dev) => {
+                eprintln!("Opened: {name}");
+                return Ok(dev);
+            }
+            Err(e) => last_error = Some((name, e)),
+        }
+    }
+    if let Some((name, e)) = last_error {
+        return Err(anyhow!(
+            "Found {name}, but could not open it: {e}\n\
+             Check permissions (macOS: Input Monitoring; Linux: udev rules) \
+             and that no other program is using the meter."
+        ));
     }
     Err(anyhow!(
         "No supported Contour device found — is it plugged in?\n\
@@ -189,8 +209,15 @@ pub fn open_device(api: &HidApi) -> Result<HidDevice> {
 
 // ── Low-level HID I/O ─────────────────────────────────────────────────────────
 
+/// Position of the size byte in a 64-byte packet.
+const PKT_SIZE_OFFSET: usize = 3;
+/// Position of the first data byte in a 64-byte packet.
+const PKT_DATA_OFFSET: usize = 4;
+/// A write buffer is one byte longer than a packet. The extra byte is the report ID.
+const WRITE_PACKET_SIZE: usize = HID_PACKET_SIZE + 1;
+
 /// Build a 65-byte write buffer (report-ID + 64 payload bytes).
-fn build_write_packet(data: &[u8]) -> [u8; 65] {
+fn build_write_packet(data: &[u8]) -> [u8; WRITE_PACKET_SIZE] {
     debug_assert!(
         data.len() <= MAX_PAYLOAD,
         "write payload {} exceeds MAX_PAYLOAD {}",
@@ -198,13 +225,14 @@ fn build_write_packet(data: &[u8]) -> [u8; 65] {
         MAX_PAYLOAD
     );
     // Layout: [report_id=0, hdr0=0, hdr1=0, hdr2=0, length, data..., padding]
-    let mut pkt = [0u8; 65];
-    pkt[4] = data.len() as u8;
-    pkt[5..5 + data.len()].copy_from_slice(data);
+    let mut pkt = [0u8; WRITE_PACKET_SIZE];
+    // The report ID shifts every offset by one.
+    pkt[PKT_SIZE_OFFSET + 1] = data.len() as u8;
+    pkt[PKT_DATA_OFFSET + 1..PKT_DATA_OFFSET + 1 + data.len()].copy_from_slice(data);
     pkt
 }
 
-/// Captures HID packets for `--format bytes`. When `capture` is false,
+/// Keeps HID packets for `--format bytes` and `--format binary`. When `capture` is false,
 /// `push` is a no-op and no allocations happen beyond the empty Vec itself.
 struct PacketLog {
     packets: Vec<Packet>,
@@ -229,7 +257,8 @@ impl PacketLog {
 fn hid_write(device: &HidDevice, data: &[u8], log: &mut PacketLog) -> Result<()> {
     let pkt = build_write_packet(data);
     // Log without the report-ID byte
-    let tx_data: [u8; HID_PACKET_SIZE] = pkt[1..].try_into().expect("pkt is 65 bytes");
+    let tx_data: [u8; HID_PACKET_SIZE] =
+        pkt[1..].try_into().expect("pkt is WRITE_PACKET_SIZE bytes");
     log.push(Packet {
         dir: Dir::Tx,
         data: tx_data,
@@ -307,9 +336,9 @@ impl MessageAssembler {
     /// Feed one packet. Returns `Some` once the accumulated bytes form a
     /// complete message, resetting for the next one.
     fn push(&mut self, pkt: &[u8; HID_PACKET_SIZE]) -> Option<Result<Message>> {
-        let size = pkt[3] as usize;
-        let data_end = (4 + size).min(HID_PACKET_SIZE);
-        self.buf.extend_from_slice(&pkt[4..data_end]);
+        let size = pkt[PKT_SIZE_OFFSET] as usize;
+        let data_end = (PKT_DATA_OFFSET + size).min(HID_PACKET_SIZE);
+        self.buf.extend_from_slice(&pkt[PKT_DATA_OFFSET..data_end]);
 
         if self.buf.len() > MAX_MESSAGE_SIZE {
             self.buf.clear();
@@ -414,7 +443,10 @@ fn parse_record(frame: &str) -> Result<Record> {
         //   Q = Query / inquiry
         //   S = Scientific
         Some('P' | 'C' | 'O' | 'M' | 'Q' | 'S') => Ok(Record::Skip),
-        Some(c) => Err(anyhow!("Unknown record type '{c}' in frame: {frame:?}")),
+        Some(c) => Err(anyhow!(
+            "Unknown record type '{}' in frame: {frame:?}",
+            c.escape_debug()
+        )),
         None => Err(anyhow!("Empty frame")),
     }
 }
@@ -518,8 +550,15 @@ fn parse_result_record(frame: &str) -> Result<Record> {
         return Ok(Record::Skip);
     }
 
-    let record_number: u32 = fields[1].parse().unwrap_or(0);
-    let value: f64 = fields[3].parse().unwrap_or(0.0);
+    // A bad number must be an error. Using a default would invent a reading.
+    let record_number: u32 = fields[1]
+        .trim()
+        .parse()
+        .map_err(|_| anyhow!("bad record number in R record: {frame:?}"))?;
+    let value: f64 = match fields[3].trim().parse::<f64>() {
+        Ok(v) if v.is_finite() && v >= 0.0 => v,
+        _ => return Err(anyhow!("unreadable value in R record: {frame:?}")),
+    };
     let units = fields[4].split('^').next().unwrap_or("mg/dL").to_string();
 
     // fields[6] is the annotation / marker field, e.g. "A/M0/T1", ">", "C"
@@ -663,14 +702,21 @@ pub fn decode_packets(bytes: &[u8]) -> Result<Vec<Packet>> {
 /// Rebuild a Session by replaying captured HID packets through the same
 /// framing and record parsing the live read uses.
 ///
-/// Only RX packets carry meter data — TX entries are our own ACK/NAK traffic.
+/// Only RX packets carry meter data. TX entries are our own ACK/NAK traffic.
+/// A TX packet also marks the start of a new receive: the live read always
+/// writes before it reads, and it drops any half-read message. Replay does the
+/// same, so a partial message cannot corrupt the meter's resend.
 /// Messages that fail to decode are skipped: in the live session those were
 /// NAK'd and retried, so the retry's good copy appears later in the stream.
-pub fn session_from_packets(packets: Vec<Packet>) -> Result<Session> {
+pub fn session_from_packets(mut packets: Vec<Packet>) -> Result<Session> {
     let mut asm = MessageAssembler::new();
     let mut builder = SessionBuilder::new(false);
 
-    for pkt in packets.iter().filter(|p| matches!(p.dir, Dir::Rx)) {
+    for pkt in &packets {
+        if matches!(pkt.dir, Dir::Tx) {
+            asm = MessageAssembler::new();
+            continue;
+        }
         let Some(Ok(msg)) = asm.push(&pkt.data) else {
             continue;
         };
@@ -691,30 +737,14 @@ pub fn session_from_packets(packets: Vec<Packet>) -> Result<Session> {
         }
     }
 
-    let (device, readings, raw_records) = builder.finish(
+    builder.finish(
         "Capture contains no records — it may be truncated, or from a session that failed \
          before the meter sent anything.",
-    )?;
-
-    Ok(Session {
-        device,
-        readings,
-        raw_records,
-        raw_packets: packets,
-    })
+        &mut packets,
+    )
 }
 
 // ── Text-format round-trip ────────────────────────────────────────────────────
-
-/// Parse a `--format records` text dump (one ASTM frame per line) back into
-/// structured data.  Lines that cannot be parsed are silently skipped.
-/// Thin wrapper over [`session_from_records_text`]; currently exercised only
-/// by tests, hence the dead-code allowance for non-test builds.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn parse_records_from_text(text: &str) -> (DeviceInfo, Vec<Reading>) {
-    let session = session_from_records_text(text);
-    (session.device, session.readings)
-}
 
 /// Build a Session from a saved `--format records` text dump in a single pass:
 /// every trimmed non-empty line is kept verbatim in `raw_records`, and lines
@@ -729,11 +759,13 @@ pub fn session_from_records_text(text: &str) -> Session {
     let mut readings = Vec::new();
     let mut raw_records = Vec::new();
     let mut unparsed = 0usize;
+    let mut saw_terminator = false;
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
         raw_records.push(line.to_string());
         match parse_record(line) {
             Ok(Record::Header(info)) => device = info,
             Ok(Record::Result(r)) if !r.is_control => readings.push(r),
+            Ok(Record::Terminator) => saw_terminator = true,
             // Control readings and the P/C/O/M/Q/S/L record types are
             // recognised and deliberately carry nothing into the output.
             Ok(_) => {}
@@ -749,6 +781,9 @@ pub fn session_from_records_text(text: &str) -> Session {
             raw_records.len()
         );
     }
+    if !raw_records.is_empty() && !saw_terminator {
+        eprintln!("warning: no L (terminator) record found; the dump may be incomplete");
+    }
     Session {
         device,
         readings,
@@ -761,6 +796,7 @@ pub fn session_from_records_text(text: &str) -> Session {
 
 /// Send one command, receive one complete message, retry with NAK on transient errors.
 fn get_one_record(device: &HidDevice, log: &mut PacketLog) -> Result<(Record, String)> {
+    // Counts every pass that does not return a record.
     let mut retries = 0u32;
     let mut cmd = ACK;
 
@@ -772,38 +808,47 @@ fn get_one_record(device: &HidDevice, log: &mut PacketLog) -> Result<(Record, St
             Ok(m) => m,
             Err(e) => {
                 retries += 1;
-                if retries >= IO_RETRIES {
+                if retries >= MAX_RETRIES {
                     return Err(e);
                 }
-                eprintln!("Receive error ({retries}/{IO_RETRIES}): {e}");
+                eprintln!("Receive error ({retries}/{MAX_RETRIES}): {e}");
                 cmd = NAK;
                 continue;
             }
         };
 
         match msg.msg_type {
-            // Device signalling it's ready to send — ACK and loop to get actual data
-            ENQ => continue,
             EOT => return Ok((Record::EndOfTransmission, String::new())),
-            ACK => continue,
             STX => match parse_record(&msg.frame) {
                 Ok(record) => return Ok((record, msg.frame)),
                 Err(e) => {
                     retries += 1;
-                    if retries >= PROTO_RETRIES {
+                    if retries >= MAX_RETRIES {
                         return Err(e);
                     }
-                    eprintln!("Parse error ({retries}/{PROTO_RETRIES}): {e}");
+                    eprintln!("Parse error ({retries}/{MAX_RETRIES}): {e}");
                     cmd = NAK;
                 }
             },
-            other => {
+            // ENQ or ACK: the meter is not ready to send yet. ACK again, but
+            // count the pass so a device that never sends data cannot loop forever.
+            ENQ | ACK => {
                 retries += 1;
-                if retries >= PROTO_RETRIES {
+                if retries >= MAX_RETRIES {
                     return Err(anyhow!(
-                        "Unexpected message byte {other:#04x} after {PROTO_RETRIES} retries"
+                        "Meter sent {:#04x} {MAX_RETRIES} times but no data",
+                        msg.msg_type
                     ));
                 }
+            }
+            other => {
+                retries += 1;
+                if retries >= MAX_RETRIES {
+                    return Err(anyhow!(
+                        "Unexpected message byte {other:#04x} after {MAX_RETRIES} retries"
+                    ));
+                }
+                eprintln!("Unexpected message byte {other:#04x} ({retries}/{MAX_RETRIES})");
                 cmd = NAK;
             }
         }
@@ -846,25 +891,13 @@ pub fn fetch_all(
     capture_packets: bool,
 ) -> Result<Session, FetchError> {
     let mut log = PacketLog::new(capture_packets);
-    match fetch_all_inner(device, progress, &mut log) {
-        Ok((device_info, readings, raw_records)) => Ok(Session {
-            device: device_info,
-            readings,
-            raw_records,
-            raw_packets: log.packets,
-        }),
-        Err(error) => Err(FetchError {
-            error,
-            packets: log.packets,
-        }),
-    }
+    fetch_all_inner(device, progress, &mut log).map_err(|error| FetchError {
+        error,
+        packets: log.packets,
+    })
 }
 
-fn fetch_all_inner(
-    device: &HidDevice,
-    progress: bool,
-    packets: &mut PacketLog,
-) -> Result<(DeviceInfo, Vec<Reading>, Vec<String>)> {
+fn fetch_all_inner(device: &HidDevice, progress: bool, packets: &mut PacketLog) -> Result<Session> {
     let mut builder = SessionBuilder::new(progress);
 
     loop {
@@ -890,6 +923,7 @@ fn fetch_all_inner(
     builder.finish(
         "Meter sent no records. It usually needs a short rest between \
          sessions — wait ~10 seconds and retry.",
+        &mut packets.packets,
     )
 }
 
@@ -911,6 +945,7 @@ struct SessionBuilder {
     readings: Vec<Reading>,
     raw_records: Vec<String>,
     progress: bool,
+    saw_terminator: bool,
 }
 
 impl SessionBuilder {
@@ -920,6 +955,7 @@ impl SessionBuilder {
             readings: Vec::new(),
             raw_records: Vec::new(),
             progress,
+            saw_terminator: false,
         }
     }
 
@@ -933,7 +969,10 @@ impl SessionBuilder {
             Record::Header(info) => self.device = info,
             Record::Result(r) => self.push_reading(r),
             Record::Skip => {}
-            Record::Terminator => return Flow::Close,
+            Record::Terminator => {
+                self.saw_terminator = true;
+                return Flow::Close;
+            }
             Record::EndOfTransmission => return Flow::Stop,
         }
         Flow::Continue
@@ -952,11 +991,13 @@ impl SessionBuilder {
             let total = self.device.record_count;
             let n = self.readings.len() + 1;
             let pct = (100 * n as u32).checked_div(total).unwrap_or(0);
-            eprint!(
-                "\r[{n:>3}/{total}] {pct:>3}%  {}  {:.1} {}  {}{}",
-                r.timestamp,
+            // Pad to a fixed width so a shorter line fully covers the last one.
+            // Format to a String first: escape_debug() ignores width.
+            let line = format!(
+                "[{n:>3}/{total}] {pct:>3}%  {}  {:.1} {}  {}{}",
+                r.timestamp.escape_debug(),
                 r.value,
-                r.units,
+                r.units.escape_debug(),
                 if r.high {
                     "HIGH "
                 } else if r.low {
@@ -966,6 +1007,7 @@ impl SessionBuilder {
                 },
                 r.meal_marker.as_deref().unwrap_or(""),
             );
+            eprint!("\r{line:<80}");
             let _ = std::io::stderr().flush();
         }
         self.readings.push(r);
@@ -973,7 +1015,10 @@ impl SessionBuilder {
 
     /// `empty_err` is the message for a session that decoded no records at
     /// all — the advice differs between a live meter and a capture file.
-    fn finish(self, empty_err: &str) -> Result<(DeviceInfo, Vec<Reading>, Vec<String>)> {
+    ///
+    /// On success the packets move into the Session. On error they stay in
+    /// `packets`, so the caller can still dump them.
+    fn finish(self, empty_err: &str, packets: &mut Vec<Packet>) -> Result<Session> {
         if self.progress {
             // Move to a fresh line after the progress output
             eprintln!();
@@ -983,14 +1028,26 @@ impl SessionBuilder {
             return Err(anyhow!("{empty_err}"));
         }
 
+        // Without the L record the list may be short. Do not call it done.
+        if !self.saw_terminator {
+            return Err(anyhow!(
+                "Session ended before the L (terminator) record, so the data is incomplete."
+            ));
+        }
+
         eprintln!(
             "Done: {} readings from {} (S/N {})",
             self.readings.len(),
-            self.device.model,
-            self.device.serial_number
+            self.device.model.escape_debug(),
+            self.device.serial_number.escape_debug()
         );
 
-        Ok((self.device, self.readings, self.raw_records))
+        Ok(Session {
+            device: self.device,
+            readings: self.readings,
+            raw_records: self.raw_records,
+            raw_packets: std::mem::take(packets),
+        })
     }
 }
 
@@ -1272,6 +1329,20 @@ mod tests {
         assert!(r.is_control);
     }
 
+    #[test]
+    fn result_unreadable_value_is_error() {
+        for v in ["HI", "", "NaN", "inf", "-1"] {
+            let frame = format!("R|1|^^^Glucose|{v}|mg/dL^P||A/M0/T1||201505261150");
+            assert!(parse_result_record(&frame).is_err(), "value {v:?}");
+        }
+    }
+
+    #[test]
+    fn result_bad_record_number_is_error() {
+        let frame = "R|x|^^^Glucose|93|mg/dL^P||A/M0/T1||201505261150";
+        assert!(parse_result_record(frame).is_err());
+    }
+
     // ── parse_header ──────────────────────────────────────────────────────────
 
     #[test]
@@ -1444,8 +1515,8 @@ mod tests {
     fn packet(dir: Dir, data: &[u8]) -> Packet {
         assert!(data.len() <= MAX_PAYLOAD, "payload too big for one packet");
         let mut buf = [0u8; HID_PACKET_SIZE];
-        buf[3] = data.len() as u8;
-        buf[4..4 + data.len()].copy_from_slice(data);
+        buf[PKT_SIZE_OFFSET] = data.len() as u8;
+        buf[PKT_DATA_OFFSET..PKT_DATA_OFFSET + data.len()].copy_from_slice(data);
         Packet { dir, data: buf }
     }
 
@@ -1498,11 +1569,7 @@ mod tests {
         let packets = fixture_capture();
         let decoded = decode_packets(&encode_packets(&packets)).unwrap();
 
-        assert_eq!(decoded.len(), packets.len());
-        for (a, b) in decoded.iter().zip(&packets) {
-            assert_eq!(a.data, b.data);
-            assert_eq!(a.dir.to_string(), b.dir.to_string());
-        }
+        assert_eq!(decoded, packets);
     }
 
     #[test]
@@ -1582,8 +1649,75 @@ mod tests {
     }
 
     #[test]
+    fn replay_drops_partial_message_before_a_resend() {
+        let lines = fixture_lines();
+        let mut packets = vec![packet(Dir::Tx, &[ACK])];
+        for (i, line) in lines.iter().enumerate() {
+            let frame = framed((i % 8) as u8, line);
+            if i == 0 {
+                // The read timed out after the first packet. We sent NAK and
+                // the meter sent the whole message again.
+                assert!(frame.len() > 1, "H record must span several packets");
+                packets.push(frame[0].clone());
+                packets.push(packet(Dir::Tx, &[NAK]));
+            }
+            packets.extend(frame);
+        }
+        packets.push(packet(Dir::Rx, &[EOT]));
+
+        let session = session_from_packets(packets).unwrap();
+        assert_eq!(session.raw_records, lines);
+        assert_eq!(session.device.model, "ContourTest");
+    }
+
+    #[test]
     fn empty_capture_is_an_error_not_an_empty_session() {
         let err = session_from_packets(vec![packet(Dir::Rx, &[EOT])]).unwrap_err();
         assert!(err.to_string().contains("no records"), "got: {err}");
+    }
+
+    /// Parse a records text dump and return only the device and readings.
+    fn parse_records_from_text(text: &str) -> (DeviceInfo, Vec<Reading>) {
+        let session = session_from_records_text(text);
+        (session.device, session.readings)
+    }
+
+    /// Packets for the fixture records without the final L record.
+    fn capture_without_terminator() -> Vec<Packet> {
+        let lines = fixture_lines();
+        assert!(lines.last().unwrap().starts_with('L'));
+        let mut packets = Vec::new();
+        for (i, line) in lines[..lines.len() - 1].iter().enumerate() {
+            packets.extend(framed((i % 8) as u8, line));
+        }
+        packets
+    }
+
+    #[test]
+    fn capture_ending_with_eot_but_no_l_record_is_an_error() {
+        let mut packets = capture_without_terminator();
+        packets.push(packet(Dir::Rx, &[EOT]));
+        let err = session_from_packets(packets).unwrap_err();
+        assert!(err.to_string().contains("incomplete"), "got: {err}");
+    }
+
+    #[test]
+    fn capture_that_just_stops_is_an_error() {
+        let err = session_from_packets(capture_without_terminator()).unwrap_err();
+        assert!(err.to_string().contains("incomplete"), "got: {err}");
+    }
+
+    #[test]
+    fn unknown_record_error_does_not_contain_raw_escape_byte() {
+        let err = parse_record("\x1b[2J|junk").unwrap_err().to_string();
+        assert!(!err.contains('\x1b'), "got: {err:?}");
+    }
+
+    #[test]
+    fn records_text_without_l_line_still_returns_readings() {
+        let lines = fixture_lines();
+        let text = lines[..lines.len() - 1].join("\n");
+        let session = session_from_records_text(&text);
+        assert!(!session.readings.is_empty());
     }
 }
