@@ -63,6 +63,15 @@ fn write_json<W: Write>(session: &Session, w: &mut W) -> Result<()> {
 
 /// Text from the meter or an input file can start with a character that a
 /// spreadsheet runs as a formula. A leading quote makes it plain text.
+///
+/// The rule comes from the OWASP page "CSV Injection":
+/// https://owasp.org/www-community/attacks/CSV_Injection
+/// The quote is a mark that says "this cell is text". It is not half of a
+/// pair, so there is no closing quote, and a quote inside the text needs no
+/// escape. The csv writer already wraps a cell in double quotes and doubles
+/// a double quote when needed, so text cannot start a new cell.
+/// This lowers the risk. It is not a full guarantee: OWASP says no method
+/// is safe for every spreadsheet program.
 fn csv_safe(cell: &str) -> String {
     // The four U+FF.. chars are the full-width equals, plus, hyphen-minus
     // and at sign.
