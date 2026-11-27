@@ -807,7 +807,8 @@ fn session_and_controls_from_text(text: &str) -> (Session, usize) {
     (session, controls)
 }
 
-/// Control solution readings are not output, so say how many were left out.
+/// One function builds the note, so the live read, the replay and
+/// `--from-records` print exactly the same text.
 fn control_skip_message(n: usize) -> String {
     format!("note: left out {n} control solution reading(s); they are still in the records output")
 }
