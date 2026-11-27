@@ -757,6 +757,16 @@ pub fn session_from_packets(mut packets: Vec<Packet>) -> Result<Session> {
 /// quietly short CSV that looks perfectly valid.
 /// `raw_packets` is left empty — file-driven input has no HID traffic.
 pub fn session_from_records_text(text: &str) -> Session {
+    let (session, controls) = session_and_controls_from_text(text);
+    if controls > 0 {
+        eprintln!("{}", control_skip_message(controls));
+    }
+    session
+}
+
+/// Does the work of `session_from_records_text`. Also returns how many
+/// control readings were left out, so a test can check the count.
+fn session_and_controls_from_text(text: &str) -> (Session, usize) {
     let mut device = DeviceInfo::default();
     let mut readings = Vec::new();
     let mut raw_records = Vec::new();
@@ -788,15 +798,13 @@ pub fn session_from_records_text(text: &str) -> Session {
     if !raw_records.is_empty() && !saw_terminator {
         eprintln!("warning: no L (terminator) record found; the dump may be incomplete");
     }
-    if controls > 0 {
-        eprintln!("{}", control_skip_message(controls));
-    }
-    Session {
+    let session = Session {
         device,
         readings,
         raw_records,
         raw_packets: Vec::new(),
-    }
+    };
+    (session, controls)
 }
 
 /// Control solution readings are not output, so say how many were left out.
@@ -1493,6 +1501,18 @@ mod tests {
         // The fixture has no control reading, so all 6 R records are kept.
         let (_, readings) = parse_records_from_text(FIXTURE);
         assert_eq!(readings.len(), 6);
+    }
+
+    #[test]
+    fn records_text_counts_control_readings() {
+        let text = FIXTURE.replace(
+            "L|1||N",
+            "R|7|^^^Glucose|5.5|mmol/L^P||C||20200102100000\nL|1||N",
+        );
+        let (session, controls) = session_and_controls_from_text(&text);
+        assert_eq!(controls, 1);
+        assert!(session.readings.iter().all(|r| !r.is_control));
+        assert_eq!(session.readings.len(), 6);
     }
 
     #[test]
