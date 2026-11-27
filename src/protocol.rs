@@ -1081,7 +1081,12 @@ impl SessionBuilder {
     }
 
     /// Each part has a fixed width, so all lines are the same length and a
-    /// new line fully covers the last one. This works on any terminal width.
+    /// new line fully covers the last one.
+    ///
+    /// The line is about 65 columns wide. It is at most 67 columns for a
+    /// meter with 1000 or more readings. On a narrower terminal the line
+    /// wraps, and each reading then prints on its own row. This is by
+    /// design: the tool does not check the terminal size.
     fn progress_line(n: usize, total: u32, r: &Reading) -> String {
         let pct = (100 * n as u32).checked_div(total).unwrap_or(0);
         // Format to Strings first: escape_debug() ignores width.
