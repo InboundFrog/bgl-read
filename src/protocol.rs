@@ -2016,6 +2016,7 @@ mod tests {
         let text = err.error.to_string();
         assert_eq!(meter.sent().len(), MAX_RETRIES as usize);
         assert!(text.contains("0x05"), "got: {text}");
+        assert!(text.contains("last reply"), "got: {text}");
         assert!(
             !text.contains(&format!("sent 0x05 {MAX_RETRIES} times")),
             "got: {text}"
