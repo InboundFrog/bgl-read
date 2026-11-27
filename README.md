@@ -92,7 +92,9 @@ warns on stderr and gives a count of the lines it could not parse.
 
 Use `--format` to choose a format. Use `--output FILE` to write to a file
 instead of stdout. `binary` refuses to write to a terminal. Give it `--output`
-or pipe it to another program.
+or pipe it to another program. On Unix, only your user can read or write
+a new output file (mode 0600, or stricter if your umask is stricter). An
+existing file keeps its mode.
 
 | `--format` | Description                                                            |
 |------------|------------------------------------------------------------------------|
@@ -120,8 +122,8 @@ All Contour Next devices share USB vendor ID `0x1A79` (Ascensia / Bayer).
 | `0x6220`   | Contour Next Link                   |
 | `0x6230`   | Contour Next Link 2.4               |
 
-The tool opens the first matching device it finds. Run `--list` to see the
-connected devices.
+The tool tries the products in the order of this table and uses the first one it
+can open. Run `--list` to see the connected devices.
 
 ---
 
@@ -131,7 +133,8 @@ connected devices.
   New readings overwrite older ones without a warning. Read the meter often if
   you need the full history.
 - **Control solution** readings (used to check the meter) are found in the
-  annotation field. The tool leaves them out of the output.
+  annotation field. The tool leaves them out of the output and prints how
+  many it left out.
 - `--format records` output is the **raw meter transcript**. The header (`H`)
   line has the meter's **password** and serial number. The dump has every
   reading. The `bytes` and `binary` captures hold the same transcript without
