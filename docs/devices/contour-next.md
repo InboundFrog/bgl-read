@@ -2,13 +2,13 @@
 
 ## Supported models
 
-| Model | USB VID | USB PID | Notes |
-|---|---|---|---|
-| Contour Next One | `0x1A79` | `0x7800` | Tested |
-| Contour Next USB | `0x1A79` | `0x7440` | Untested |
-| Contour Next | `0x1A79` | `0x7350` | Untested |
+| Model                 | USB VID  | USB PID  | Notes    |
+|-----------------------|----------|----------|----------|
+| Contour Next One      | `0x1A79` | `0x7800` | Tested   |
+| Contour Next USB      | `0x1A79` | `0x7440` | Untested |
+| Contour Next          | `0x1A79` | `0x7350` | Untested |
 | Ascensia Contour Next | `0x1A79` | `0x7900` | Untested |
-| Contour Next Link | `0x1A79` | `0x6220` | Untested |
+| Contour Next Link     | `0x1A79` | `0x6220` | Untested |
 | Contour Next Link 2.4 | `0x1A79` | `0x6230` | Untested |
 
 The device shows up as a USB HID device. This is the same class as keyboards
@@ -59,15 +59,15 @@ request/response protocol. It was first made for laboratory instruments.
 STX  seq  record_text  CR  ETX|ETB  CS1  CS2  CR  LF
 ```
 
-| Field | Size | Description |
-|---|---|---|
-| `STX` | 1 byte | `0x02`, marks the start of a frame |
-| `seq` | 1 byte | ASCII digit `'0'`–`'7'`, frame sequence number |
-| `record_text` | variable | Pipe-delimited ASTM record (see below) |
-| `CR` | 1 byte | `0x0D` |
-| `ETX` or `ETB` | 1 byte | `0x03` ends the final frame; `0x17` ends an intermediate frame |
-| `CS1 CS2` | 2 bytes | Checksum as two uppercase ASCII hex digits |
-| `CR LF` | 2 bytes | `0x0D 0x0A` |
+| Field          | Size     | Description                                                    |
+|----------------|----------|----------------------------------------------------------------|
+| `STX`          | 1 byte   | `0x02`, marks the start of a frame                             |
+| `seq`          | 1 byte   | ASCII digit `'0'`–`'7'`, frame sequence number                 |
+| `record_text`  | variable | Pipe-delimited ASTM record (see below)                         |
+| `CR`           | 1 byte   | `0x0D`                                                         |
+| `ETX` or `ETB` | 1 byte   | `0x03` ends the final frame; `0x17` ends an intermediate frame |
+| `CS1 CS2`      | 2 bytes  | Checksum as two uppercase ASCII hex digits                     |
+| `CR LF`        | 2 bytes  | `0x0D 0x0A`                                                    |
 
 The meter uses `ETB` when one record needs several physical frames. This is
 rare for these meters. `ETX` marks the final frame of a record.
@@ -85,11 +85,11 @@ checksum = format!("{:02X}", bytes[seq..=frame_end].iter().sum::<u32>() % 256)
 
 Some messages are one control byte with no framing:
 
-| Byte | Hex | Meaning |
-|---|---|---|
-| `ENQ` | `0x05` | The meter is ready to send data |
-| `EOT` | `0x04` | End of transmission |
-| `ACK` | `0x06` | Acknowledge |
+| Byte  | Hex    | Meaning                                       |
+|-------|--------|-----------------------------------------------|
+| `ENQ` | `0x05` | The meter is ready to send data               |
+| `EOT` | `0x04` | End of transmission                           |
+| `ACK` | `0x06` | Acknowledge                                   |
 | `NAK` | `0x15` | Not acknowledge; asks the meter to send again |
 
 ---
@@ -144,16 +144,16 @@ H|\^&||<mid>|<device>|<config>|<nrecs>|||||P|1|<timestamp>
 
 These fields matter most (0-indexed):
 
-| Index | Example | Description |
-|---|---|---|
-| 4 | `Contour7800^FW^7830H5001733^` | Device info, delimited by `^` |
-| 4[0] | `Contour7800` | Model code (`bgl-read` reports it as received; see the table below) |
-| 4[2] | `7830H5001733` | Raw serial. Remove the leading digits and one separator to get `5001733` |
-| 5 | `A=1^U=0^V=20600^…` | Config key=value pairs, delimited by `^` |
-| 5[U] | `0` | Units: `0` = mg/dL, `1` = mmol/L |
-| 5[V] | `20600` | Thresholds. The first 2 digits are the low value (20). The next 3 are the high value (600). Both use display units |
-| 6 | `150` | Number of records that follow |
-| 13 | `202411031245` | Device clock at session start (`YYYYMMDDHHmm` or `YYYYMMDDHHmmss`) |
+| Index | Example                        | Description                                                                                                        |
+|-------|--------------------------------|--------------------------------------------------------------------------------------------------------------------|
+| 4     | `Contour7800^FW^7830H5001733^` | Device info, delimited by `^`                                                                                      |
+| 4[0]  | `Contour7800`                  | Model code (`bgl-read` reports it as received; see the table below)                                                |
+| 4[2]  | `7830H5001733`                 | Raw serial. Remove the leading digits and one separator to get `5001733`                                           |
+| 5     | `A=1^U=0^V=20600^…`            | Config key=value pairs, delimited by `^`                                                                           |
+| 5[U]  | `0`                            | Units: `0` = mg/dL, `1` = mmol/L                                                                                   |
+| 5[V]  | `20600`                        | Thresholds. The first 2 digits are the low value (20). The next 3 are the high value (600). Both use display units |
+| 6     | `150`                          | Number of records that follow                                                                                      |
+| 13    | `202411031245`                 | Device clock at session start (`YYYYMMDDHHmm` or `YYYYMMDDHHmmss`)                                                 |
 
 ### P — Patient
 
@@ -167,32 +167,32 @@ The meter sends one for each stored reading, in time order.
 R|<nrec>|^^^Glucose|<value>|<units>^<method>||<markers>||<timestamp>
 ```
 
-| Field | Index | Example | Description |
-|---|---|---|---|
-| Record seq | 1 | `3` | Position in this session (not a lasting ID) |
-| Value | 3 | `5.4` or `93` | Glucose value (decimal for mmol/L, whole number for mg/dL) |
-| Units | 4 | `mmol/L^P` | Units string before `^`; method after it (`P`=plasma, `B`=whole blood, `C`=capillary) |
-| Markers | 6 | `A/M0/T1` | See below |
-| Timestamp | 8 | `202411031245` | 12 digits `YYYYMMDDHHmm` or 14 digits `YYYYMMDDHHmmss`, device local time |
+| Field      | Index | Example        | Description                                                                           |
+|------------|-------|----------------|---------------------------------------------------------------------------------------|
+| Record seq | 1     | `3`            | Position in this session (not a lasting ID)                                           |
+| Value      | 3     | `5.4` or `93`  | Glucose value (decimal for mmol/L, whole number for mg/dL)                            |
+| Units      | 4     | `mmol/L^P`     | Units string before `^`; method after it (`P`=plasma, `B`=whole blood, `C`=capillary) |
+| Markers    | 6     | `A/M0/T1`      | See below                                                                             |
+| Timestamp  | 8     | `202411031245` | 12 digits `YYYYMMDDHHmm` or 14 digits `YYYYMMDDHHmmss`, device local time             |
 
 #### Marker field
 
 The marker field (index 6) is a string split by slashes. The first character
 is the meal mark:
 
-| Char | Meaning |
-|---|---|
-| `B` | Pre-meal |
-| `A` | Post-meal |
-| `D` | Logbook |
+| Char | Meaning   |
+|------|-----------|
+| `B`  | Pre-meal  |
+| `A`  | Post-meal |
+| `D`  | Logbook.  |
 
 `bgl-read` looks for these flags anywhere in the field:
 
-| Char | Meaning |
-|---|---|
-| `>` | Above high threshold |
-| `<` | Below low threshold |
-| `C` | Control solution test (discard — not a patient reading) |
+| Char | Meaning                                                 |
+|------|---------------------------------------------------------|
+| `>`  | Above high threshold                                    |
+| `<`  | Below low threshold                                     |
+| `C`  | Control solution test (discard — not a patient reading) |
 
 ### L — Terminator
 
@@ -216,15 +216,15 @@ The model string in the H record (e.g. `Contour7800`) identifies the model.
 `bgl-read` has no lookup for it and reports the code as received. This table is
 for reference only:
 
-| Code | Name |
-|---|---|
-| `Contour7800` | Contour Next One |
-| `Contour7410` | Contour Next USB |
-| `Contour7350` | Contour Next |
+| Code          | Name                  |
+|---------------|-----------------------|
+| `Contour7800` | Contour Next One      |
+| `Contour7410` | Contour Next USB      |
+| `Contour7350` | Contour Next          |
 | `Contour7900` | Ascensia Contour Next |
-| `Contour6200` | Contour Next Link |
+| `Contour6200` | Contour Next Link     |
 | `Contour6210` | Contour Next Link 2.4 |
-| `Contour7390` | Contour USB |
+| `Contour7390` | Contour USB           |
 
 Older firmware may use the prefix `Bayer` instead of `Contour`.
 
