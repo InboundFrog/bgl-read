@@ -177,7 +177,7 @@ fn hex_dump<W: Write>(data: &[u8], w: &mut W) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{Format, hex_dump, write_to};
-    use crate::protocol::{DeviceInfo, Session};
+    use crate::protocol::Session;
     use std::io::{self, BufWriter, Write};
 
     /// A writer that accepts no data and fails on flush.
@@ -195,17 +195,8 @@ mod tests {
     #[test]
     fn write_to_reports_flush_error() {
         let session = Session {
-            device: DeviceInfo {
-                model: String::new(),
-                serial_number: String::new(),
-                record_count: 0,
-                device_time: String::new(),
-                low_threshold: 0,
-                high_threshold: 0,
-            },
-            readings: vec![],
             raw_records: vec!["H|test".to_string()],
-            raw_packets: vec![],
+            ..Default::default()
         };
         // The record is smaller than the buffer, so only the flush can fail.
         let w = BufWriter::new(FailingWriter);

@@ -15,7 +15,8 @@
 //!
 //! ASTM frame structure inside the data bytes:
 //!   STX  seq_digit  record_text  CR  ETX|ETB  CS1  CS2  CR  LF
-//! The checksum covers seq_digit through ETX/ETB (inclusive). It is the sum of those bytes mod 256, in uppercase hex.
+//! The checksum covers seq_digit through ETX/ETB (inclusive).
+//! It is the sum of those bytes mod 256, in uppercase hex.
 
 use anyhow::{Result, anyhow};
 use hidapi::{HidApi, HidDevice};
@@ -1498,6 +1499,12 @@ mod tests {
 
     const FIXTURE: &str = include_str!("../tests/fixtures/sample.txt");
 
+    /// Parse a records text dump and return only the device and readings.
+    fn parse_records_from_text(text: &str) -> (DeviceInfo, Vec<Reading>) {
+        let session = session_from_records_text(text);
+        (session.device, session.readings)
+    }
+
     #[test]
     fn fixture_device_info_parses() {
         let (device, _) = parse_records_from_text(FIXTURE);
@@ -1784,11 +1791,7 @@ mod tests {
         assert!(err.to_string().contains("no records"), "got: {err}");
     }
 
-    /// Parse a records text dump and return only the device and readings.
-    fn parse_records_from_text(text: &str) -> (DeviceInfo, Vec<Reading>) {
-        let session = session_from_records_text(text);
-        (session.device, session.readings)
-    }
+    // ── Incomplete sessions and escaped errors ────────────────────────────────
 
     /// Packets for the fixture records without the final L record.
     fn capture_without_terminator() -> Vec<Packet> {
