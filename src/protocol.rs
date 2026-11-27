@@ -1005,8 +1005,8 @@ impl SessionBuilder {
         if r.is_control {
             self.controls += 1;
             if self.progress {
-                eprint!("\r{:80}\r", ""); // clear line
-                eprintln!("(skipping control reading #{})", r.record_number);
+                // Start a new line, so the note does not overwrite the progress line.
+                eprintln!("\n(skipping control reading #{})", r.record_number);
             }
             return;
         }
@@ -1014,27 +1014,31 @@ impl SessionBuilder {
         if self.progress {
             let total = self.device.record_count;
             let n = self.readings.len() + 1;
-            let pct = (100 * n as u32).checked_div(total).unwrap_or(0);
-            // Pad to a fixed width so a shorter line fully covers the last one.
-            // Format to a String first: escape_debug() ignores width.
-            let line = format!(
-                "[{n:>3}/{total}] {pct:>3}%  {}  {:.1} {}  {}{}",
-                r.timestamp.escape_debug(),
-                r.value,
-                r.units.escape_debug(),
-                if r.high {
-                    "HIGH "
-                } else if r.low {
-                    "LOW  "
-                } else {
-                    "     "
-                },
-                r.meal_marker.as_deref().unwrap_or(""),
-            );
-            eprint!("\r{line:<80}");
+            eprint!("\r{}", Self::progress_line(n, total, &r));
             let _ = std::io::stderr().flush();
         }
         self.readings.push(r);
+    }
+
+    /// Each part has a fixed width, so all lines are the same length and a
+    /// new line fully covers the last one. This works on any terminal width.
+    fn progress_line(n: usize, total: u32, r: &Reading) -> String {
+        let pct = (100 * n as u32).checked_div(total).unwrap_or(0);
+        // Format to Strings first: escape_debug() ignores width.
+        let ts = r.timestamp.escape_debug().to_string();
+        let units = r.units.escape_debug().to_string();
+        let flag = if r.high {
+            "HIGH "
+        } else if r.low {
+            "LOW  "
+        } else {
+            "     "
+        };
+        let meal = r.meal_marker.as_deref().unwrap_or("");
+        format!(
+            "[{n:>3}/{total}] {pct:>3}%  {ts}  {:>5.1} {units:<6}  {flag}{meal:<9}",
+            r.value
+        )
     }
 
     /// `empty_err` is the message for a session that decoded no records at
@@ -1541,6 +1545,28 @@ mod tests {
         b.push_reading(mk("B"));
         assert_eq!(b.controls, 1);
         assert_eq!(b.readings.len(), 1);
+    }
+
+    #[test]
+    fn progress_line_has_fixed_width() {
+        let mk = |value: f64, meal: Option<&str>| {
+            let mut r =
+                match parse_record("R|1|^^^Glucose|5.5|mmol/L^P||B||20200102100000").unwrap() {
+                    Record::Result(r) => r,
+                    _ => panic!("not a result"),
+                };
+            r.value = value;
+            r.meal_marker = meal.map(String::from);
+            r
+        };
+        let base = SessionBuilder::progress_line(1, 800, &mk(5.4, None)).len();
+        for v in [5.4, 19.0, 601.0] {
+            for meal in [None, Some("post-meal")] {
+                let line = SessionBuilder::progress_line(1, 800, &mk(v, meal));
+                assert_eq!(line.len(), base, "{line:?}");
+                assert!(line.len() <= 79);
+            }
+        }
     }
 
     #[test]
