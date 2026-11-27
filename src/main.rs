@@ -55,7 +55,16 @@ fn main() -> Result<()> {
 
     if let Some(path) = cli.from_bytes.as_deref() {
         let packets = protocol::decode_packets(&std::fs::read(path)?)?;
-        let session = protocol::session_from_packets(packets)?;
+        // A packet dump needs no session. Skipping the rebuild lets a person
+        // dump an incomplete capture, which is when a dump helps most.
+        let session = if matches!(cli.format, Format::Bytes | Format::Binary) {
+            protocol::Session {
+                raw_packets: packets,
+                ..Default::default()
+            }
+        } else {
+            protocol::session_from_packets(packets)?
+        };
         return output::write(&session, cli.format, cli.output.as_deref());
     }
 
@@ -89,10 +98,8 @@ fn main() -> Result<()> {
                     e.packets.len()
                 );
                 let partial = protocol::Session {
-                    device: protocol::DeviceInfo::default(),
-                    readings: Vec::new(),
-                    raw_records: Vec::new(),
                     raw_packets: e.packets,
+                    ..Default::default()
                 };
                 // Dump in whichever capture format was asked for, so a
                 // `--format binary` failure still leaves a replayable file.
@@ -100,7 +107,10 @@ fn main() -> Result<()> {
                     Format::Binary => Format::Binary,
                     _ => Format::Bytes,
                 };
-                output::write(&partial, dump, cli.output.as_deref())?;
+                // Do not let a dump failure hide the session error below.
+                if let Err(dump_err) = output::write(&partial, dump, cli.output.as_deref()) {
+                    eprintln!("warning: could not write the packet dump: {dump_err}");
+                }
             }
             return Err(e.error);
         }

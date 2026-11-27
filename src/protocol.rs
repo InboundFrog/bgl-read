@@ -136,7 +136,7 @@ pub struct Packet {
 }
 
 /// Everything captured during a session.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Session {
     pub device: DeviceInfo,
     pub readings: Vec<Reading>,
@@ -421,7 +421,10 @@ fn parse_record(frame: &str) -> Result<Record> {
         //   Q = Query / inquiry
         //   S = Scientific
         Some('P' | 'C' | 'O' | 'M' | 'Q' | 'S') => Ok(Record::Skip),
-        Some(c) => Err(anyhow!("Unknown record type '{c}' in frame: {frame:?}")),
+        Some(c) => Err(anyhow!(
+            "Unknown record type '{}' in frame: {frame:?}",
+            c.escape_debug()
+        )),
         None => Err(anyhow!("Empty frame")),
     }
 }
@@ -683,7 +686,7 @@ pub fn decode_packets(bytes: &[u8]) -> Result<Vec<Packet>> {
 /// same, so a partial message cannot corrupt the meter's resend.
 /// Messages that fail to decode are skipped: in the live session those were
 /// NAK'd and retried, so the retry's good copy appears later in the stream.
-pub fn session_from_packets(packets: Vec<Packet>) -> Result<Session> {
+pub fn session_from_packets(mut packets: Vec<Packet>) -> Result<Session> {
     let mut asm = MessageAssembler::new();
     let mut builder = SessionBuilder::new(false);
 
@@ -712,30 +715,14 @@ pub fn session_from_packets(packets: Vec<Packet>) -> Result<Session> {
         }
     }
 
-    let (device, readings, raw_records) = builder.finish(
+    builder.finish(
         "Capture contains no records — it may be truncated, or from a session that failed \
          before the meter sent anything.",
-    )?;
-
-    Ok(Session {
-        device,
-        readings,
-        raw_records,
-        raw_packets: packets,
-    })
+        &mut packets,
+    )
 }
 
 // ── Text-format round-trip ────────────────────────────────────────────────────
-
-/// Parse a `--format records` text dump (one ASTM frame per line) back into
-/// structured data.  Lines that cannot be parsed are silently skipped.
-/// Thin wrapper over [`session_from_records_text`]; currently exercised only
-/// by tests, hence the dead-code allowance for non-test builds.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn parse_records_from_text(text: &str) -> (DeviceInfo, Vec<Reading>) {
-    let session = session_from_records_text(text);
-    (session.device, session.readings)
-}
 
 /// Build a Session from a saved `--format records` text dump in a single pass:
 /// every trimmed non-empty line is kept verbatim in `raw_records`, and lines
@@ -750,11 +737,13 @@ pub fn session_from_records_text(text: &str) -> Session {
     let mut readings = Vec::new();
     let mut raw_records = Vec::new();
     let mut unparsed = 0usize;
+    let mut saw_terminator = false;
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
         raw_records.push(line.to_string());
         match parse_record(line) {
             Ok(Record::Header(info)) => device = info,
             Ok(Record::Result(r)) if !r.is_control => readings.push(r),
+            Ok(Record::Terminator) => saw_terminator = true,
             // Control readings and the P/C/O/M/Q/S/L record types are
             // recognised and deliberately carry nothing into the output.
             Ok(_) => {}
@@ -769,6 +758,9 @@ pub fn session_from_records_text(text: &str) -> Session {
             "warning: {unparsed} of {} line(s) could not be parsed; output may be incomplete",
             raw_records.len()
         );
+    }
+    if !raw_records.is_empty() && !saw_terminator {
+        eprintln!("warning: no L (terminator) record found; the dump may be incomplete");
     }
     Session {
         device,
@@ -877,25 +869,13 @@ pub fn fetch_all(
     capture_packets: bool,
 ) -> Result<Session, FetchError> {
     let mut log = PacketLog::new(capture_packets);
-    match fetch_all_inner(device, progress, &mut log) {
-        Ok((device_info, readings, raw_records)) => Ok(Session {
-            device: device_info,
-            readings,
-            raw_records,
-            raw_packets: log.packets,
-        }),
-        Err(error) => Err(FetchError {
-            error,
-            packets: log.packets,
-        }),
-    }
+    fetch_all_inner(device, progress, &mut log).map_err(|error| FetchError {
+        error,
+        packets: log.packets,
+    })
 }
 
-fn fetch_all_inner(
-    device: &HidDevice,
-    progress: bool,
-    packets: &mut PacketLog,
-) -> Result<(DeviceInfo, Vec<Reading>, Vec<String>)> {
+fn fetch_all_inner(device: &HidDevice, progress: bool, packets: &mut PacketLog) -> Result<Session> {
     let mut builder = SessionBuilder::new(progress);
 
     loop {
@@ -921,6 +901,7 @@ fn fetch_all_inner(
     builder.finish(
         "Meter sent no records. It usually needs a short rest between \
          sessions — wait ~10 seconds and retry.",
+        &mut packets.packets,
     )
 }
 
@@ -942,6 +923,7 @@ struct SessionBuilder {
     readings: Vec<Reading>,
     raw_records: Vec<String>,
     progress: bool,
+    saw_terminator: bool,
 }
 
 impl SessionBuilder {
@@ -951,6 +933,7 @@ impl SessionBuilder {
             readings: Vec::new(),
             raw_records: Vec::new(),
             progress,
+            saw_terminator: false,
         }
     }
 
@@ -964,7 +947,10 @@ impl SessionBuilder {
             Record::Header(info) => self.device = info,
             Record::Result(r) => self.push_reading(r),
             Record::Skip => {}
-            Record::Terminator => return Flow::Close,
+            Record::Terminator => {
+                self.saw_terminator = true;
+                return Flow::Close;
+            }
             Record::EndOfTransmission => return Flow::Stop,
         }
         Flow::Continue
@@ -983,11 +969,13 @@ impl SessionBuilder {
             let total = self.device.record_count;
             let n = self.readings.len() + 1;
             let pct = (100 * n as u32).checked_div(total).unwrap_or(0);
-            eprint!(
-                "\r[{n:>3}/{total}] {pct:>3}%  {}  {:.1} {}  {}{}",
-                r.timestamp,
+            // Pad to a fixed width so a shorter line fully covers the last one.
+            // Format to a String first: escape_debug() ignores width.
+            let line = format!(
+                "[{n:>3}/{total}] {pct:>3}%  {}  {:.1} {}  {}{}",
+                r.timestamp.escape_debug(),
                 r.value,
-                r.units,
+                r.units.escape_debug(),
                 if r.high {
                     "HIGH "
                 } else if r.low {
@@ -997,6 +985,7 @@ impl SessionBuilder {
                 },
                 r.meal_marker.as_deref().unwrap_or(""),
             );
+            eprint!("\r{line:<80}");
             let _ = std::io::stderr().flush();
         }
         self.readings.push(r);
@@ -1004,7 +993,10 @@ impl SessionBuilder {
 
     /// `empty_err` is the message for a session that decoded no records at
     /// all — the advice differs between a live meter and a capture file.
-    fn finish(self, empty_err: &str) -> Result<(DeviceInfo, Vec<Reading>, Vec<String>)> {
+    ///
+    /// On success the packets move into the Session. On error they stay in
+    /// `packets`, so the caller can still dump them.
+    fn finish(self, empty_err: &str, packets: &mut Vec<Packet>) -> Result<Session> {
         if self.progress {
             // Move to a fresh line after the progress output
             eprintln!();
@@ -1014,14 +1006,26 @@ impl SessionBuilder {
             return Err(anyhow!("{empty_err}"));
         }
 
+        // Without the L record the list may be short. Do not call it done.
+        if !self.saw_terminator {
+            return Err(anyhow!(
+                "Session ended before the L (terminator) record, so the data is incomplete."
+            ));
+        }
+
         eprintln!(
             "Done: {} readings from {} (S/N {})",
             self.readings.len(),
-            self.device.model,
-            self.device.serial_number
+            self.device.model.escape_debug(),
+            self.device.serial_number.escape_debug()
         );
 
-        Ok((self.device, self.readings, self.raw_records))
+        Ok(Session {
+            device: self.device,
+            readings: self.readings,
+            raw_records: self.raw_records,
+            raw_packets: std::mem::take(packets),
+        })
     }
 }
 
@@ -1640,5 +1644,50 @@ mod tests {
     fn empty_capture_is_an_error_not_an_empty_session() {
         let err = session_from_packets(vec![packet(Dir::Rx, &[EOT])]).unwrap_err();
         assert!(err.to_string().contains("no records"), "got: {err}");
+    }
+
+    /// Parse a records text dump and return only the device and readings.
+    fn parse_records_from_text(text: &str) -> (DeviceInfo, Vec<Reading>) {
+        let session = session_from_records_text(text);
+        (session.device, session.readings)
+    }
+
+    /// Packets for the fixture records without the final L record.
+    fn capture_without_terminator() -> Vec<Packet> {
+        let lines = fixture_lines();
+        assert!(lines.last().unwrap().starts_with('L'));
+        let mut packets = Vec::new();
+        for (i, line) in lines[..lines.len() - 1].iter().enumerate() {
+            packets.extend(framed((i % 8) as u8, line));
+        }
+        packets
+    }
+
+    #[test]
+    fn capture_ending_with_eot_but_no_l_record_is_an_error() {
+        let mut packets = capture_without_terminator();
+        packets.push(packet(Dir::Rx, &[EOT]));
+        let err = session_from_packets(packets).unwrap_err();
+        assert!(err.to_string().contains("incomplete"), "got: {err}");
+    }
+
+    #[test]
+    fn capture_that_just_stops_is_an_error() {
+        let err = session_from_packets(capture_without_terminator()).unwrap_err();
+        assert!(err.to_string().contains("incomplete"), "got: {err}");
+    }
+
+    #[test]
+    fn unknown_record_error_does_not_contain_raw_escape_byte() {
+        let err = parse_record("\x1b[2J|junk").unwrap_err().to_string();
+        assert!(!err.contains('\x1b'), "got: {err:?}");
+    }
+
+    #[test]
+    fn records_text_without_l_line_still_returns_readings() {
+        let lines = fixture_lines();
+        let text = lines[..lines.len() - 1].join("\n");
+        let session = session_from_records_text(&text);
+        assert!(!session.readings.is_empty());
     }
 }
