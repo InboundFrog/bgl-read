@@ -37,6 +37,13 @@ pub const SUPPORTED_DEVICES: &[(u16, &str)] = &[
     (0x6230, "Contour Next Link 2.4"),
 ];
 
+fn product_name(pid: u16) -> Option<&'static str> {
+    SUPPORTED_DEVICES
+        .iter()
+        .find(|(p, _)| *p == pid)
+        .map(|(_, n)| *n)
+}
+
 // ── ASTM control bytes ────────────────────────────────────────────────────────
 
 const ACK: u8 = 0x06;
@@ -155,16 +162,12 @@ pub fn list_devices(api: &HidApi) {
             continue;
         }
         found = true;
-        let name = SUPPORTED_DEVICES
-            .iter()
-            .find(|(pid, _)| *pid == dev.product_id())
-            .map(|(_, n)| *n)
-            .unwrap_or("Unknown Contour device");
+        let name = product_name(dev.product_id()).unwrap_or("Unknown Contour device");
         println!(
             "{name}  VID={:#06x}  PID={:#06x}  S/N={}",
             dev.vendor_id(),
             dev.product_id(),
-            dev.serial_number().unwrap_or("")
+            dev.serial_number().unwrap_or("").escape_debug()
         );
     }
     if !found {
@@ -173,11 +176,28 @@ pub fn list_devices(api: &HidApi) {
 }
 
 pub fn open_device(api: &HidApi) -> Result<HidDevice> {
-    for (pid, name) in SUPPORTED_DEVICES {
-        if let Ok(dev) = api.open(VENDOR_ID, *pid) {
-            eprintln!("Opened: {name}");
-            return Ok(dev);
+    let mut last_error = None;
+    for info in api.device_list() {
+        if info.vendor_id() != VENDOR_ID {
+            continue;
         }
+        let Some(name) = product_name(info.product_id()) else {
+            continue;
+        };
+        match info.open_device(api) {
+            Ok(dev) => {
+                eprintln!("Opened: {name}");
+                return Ok(dev);
+            }
+            Err(e) => last_error = Some((name, e)),
+        }
+    }
+    if let Some((name, e)) = last_error {
+        return Err(anyhow!(
+            "Found {name}, but could not open it: {e}\n\
+             Check permissions (macOS: Input Monitoring; Linux: udev rules) \
+             and that no other program is using the meter."
+        ));
     }
     Err(anyhow!(
         "No supported Contour device found — is it plugged in?\n\
