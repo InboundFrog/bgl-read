@@ -317,7 +317,7 @@ struct Message {
     /// Frame content stripped of STX, seq digit, ETX/ETB, checksum, and trailing CR.
     /// Empty for single-byte control messages (ENQ, EOT, ACK, NAK).
     frame: String,
-    /// Frame number (0 to 7) for STX frames. None for control bytes.
+    /// The digit after STX, normally 0 to 7. None for control bytes.
     frame_number: Option<u8>,
 }
 
