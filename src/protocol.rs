@@ -1857,4 +1857,149 @@ mod tests {
         let session = session_from_records_text(&text);
         assert!(!session.readings.is_empty());
     }
+
+    // ── Live read with a scripted meter ───────────────────────────────────────
+
+    type Script = Vec<Option<[u8; HID_PACKET_SIZE]>>;
+
+    /// A fake meter. It answers each read with the next scripted packet.
+    /// `None`, or an empty script, is a read timeout. It never sleeps.
+    struct ScriptedMeter {
+        replies: std::cell::RefCell<std::collections::VecDeque<Option<[u8; HID_PACKET_SIZE]>>>,
+        sent: std::cell::RefCell<Vec<u8>>,
+    }
+
+    impl ScriptedMeter {
+        fn new(script: Script) -> Self {
+            Self {
+                replies: std::cell::RefCell::new(script.into()),
+                sent: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+
+        fn sent(&self) -> Vec<u8> {
+            self.sent.borrow().clone()
+        }
+    }
+
+    impl Transport for ScriptedMeter {
+        fn write(&self, data: &[u8]) -> Result<()> {
+            let size = data[PKT_SIZE_OFFSET + 1] as usize;
+            let start = PKT_DATA_OFFSET + 1;
+            self.sent
+                .borrow_mut()
+                .extend_from_slice(&data[start..start + size]);
+            Ok(())
+        }
+
+        fn read_timeout(&self, buf: &mut [u8], _timeout_ms: i32) -> Result<usize> {
+            match self.replies.borrow_mut().pop_front().flatten() {
+                Some(pkt) => {
+                    buf[..HID_PACKET_SIZE].copy_from_slice(&pkt);
+                    Ok(HID_PACKET_SIZE)
+                }
+                None => Ok(0),
+            }
+        }
+    }
+
+    fn script_of(packets: Vec<Packet>) -> Script {
+        packets.into_iter().map(|p| Some(p.data)).collect()
+    }
+
+    /// ENQ, then the given records, then EOT for the close handshake.
+    fn full_script() -> Script {
+        let mut script = script_of(vec![packet(Dir::Rx, &[ENQ])]);
+        for (i, line) in fixture_lines().iter().enumerate() {
+            script.extend(script_of(framed((i % 8) as u8, line)));
+        }
+        script.extend(script_of(vec![packet(Dir::Rx, &[EOT])]));
+        script
+    }
+
+    #[test]
+    fn live_session_reads_every_record_and_closes_with_nak() {
+        let meter = ScriptedMeter::new(full_script());
+        let session = fetch_all(&meter, false, false).unwrap();
+        let (_, readings) = parse_records_from_text(FIXTURE);
+
+        assert_eq!(session.raw_records, fixture_lines());
+        assert_eq!(summarise(&session.readings), summarise(&readings));
+        let sent = meter.sent();
+        assert_eq!(sent.last(), Some(&NAK));
+        assert!(sent[..sent.len() - 1].iter().all(|&b| b == ACK));
+    }
+
+    #[test]
+    fn live_and_replay_agree() {
+        let meter = ScriptedMeter::new(full_script());
+        let live = fetch_all(&meter, false, true).unwrap();
+        let replay = session_from_packets(live.raw_packets.clone()).unwrap();
+
+        assert_eq!(live.raw_records, replay.raw_records);
+    }
+
+    #[test]
+    fn live_session_naks_a_bad_checksum_and_uses_the_resent_frame() {
+        let lines = fixture_lines();
+        let mut script = script_of(vec![packet(Dir::Rx, &[ENQ])]);
+        for (i, line) in lines.iter().enumerate() {
+            let frame = framed((i % 8) as u8, line);
+            if i == 2 {
+                let mut broken = frame.clone();
+                // Change the sequence digit. It is inside the checksum range.
+                broken[0].data[PKT_DATA_OFFSET + 1] = b'9';
+                script.extend(script_of(broken));
+            }
+            script.extend(script_of(frame));
+        }
+        script.extend(script_of(vec![packet(Dir::Rx, &[EOT])]));
+
+        let meter = ScriptedMeter::new(script);
+        let session = fetch_all(&meter, false, false).unwrap();
+
+        assert_eq!(session.raw_records, lines);
+        assert!(meter.sent().contains(&NAK));
+    }
+
+    #[test]
+    fn live_session_naks_a_read_timeout_and_carries_on() {
+        let mut script = full_script();
+        // Time out just before the third record: after ENQ and two whole frames.
+        let before_third: usize = 1
+            + (0..2)
+                .map(|i| framed(i as u8, fixture_lines()[i]).len())
+                .sum::<usize>();
+        script.insert(before_third, None);
+
+        let meter = ScriptedMeter::new(script);
+        let session = fetch_all(&meter, false, false).unwrap();
+
+        assert_eq!(session.raw_records, fixture_lines());
+        assert!(meter.sent()[..meter.sent().len() - 1].contains(&NAK));
+    }
+
+    #[test]
+    fn live_session_gives_up_when_the_meter_only_sends_enq() {
+        let enq = packet(Dir::Rx, &[ENQ]).data;
+        let meter = ScriptedMeter::new(vec![Some(enq); 3 * MAX_RETRIES as usize]);
+        let err = fetch_all(&meter, false, true).unwrap_err();
+
+        assert_eq!(meter.sent().len(), MAX_RETRIES as usize);
+        assert!(!err.packets.is_empty(), "captured packets must survive");
+    }
+
+    #[test]
+    fn live_session_with_eot_before_the_l_record_is_incomplete() {
+        let mut script = script_of(vec![packet(Dir::Rx, &[ENQ])]);
+        script.extend(script_of(framed(0, fixture_lines()[0])));
+        script.extend(script_of(vec![packet(Dir::Rx, &[EOT])]));
+
+        let err = fetch_all(&ScriptedMeter::new(script), false, false).unwrap_err();
+        assert!(
+            err.error.to_string().contains("incomplete"),
+            "got: {}",
+            err.error
+        );
+    }
 }
