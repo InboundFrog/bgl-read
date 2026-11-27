@@ -122,8 +122,8 @@ All Contour Next devices share USB vendor ID `0x1A79` (Ascensia / Bayer).
 | `0x6220`   | Contour Next Link                   |
 | `0x6230`   | Contour Next Link 2.4               |
 
-The tool opens the first matching device it finds. Run `--list` to see the
-connected devices.
+The tool tries the products in the order of this table and uses the first one it
+can open. Run `--list` to see the connected devices.
 
 ---
 

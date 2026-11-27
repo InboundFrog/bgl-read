@@ -179,27 +179,27 @@ pub fn list_devices(api: &HidApi) {
 }
 
 pub fn open_device(api: &HidApi) -> Result<HidDevice> {
-    let mut last_error = None;
-    for info in api.device_list() {
-        if info.vendor_id() != VENDOR_ID {
-            continue;
-        }
-        let Some(name) = product_name(info.product_id()) else {
-            continue;
-        };
-        match info.open_device(api) {
-            Ok(dev) => {
-                eprintln!("Opened: {name}");
-                return Ok(dev);
+    let mut errors = Vec::new();
+    for &(pid, name) in SUPPORTED_DEVICES {
+        for info in api.device_list() {
+            if info.vendor_id() != VENDOR_ID || info.product_id() != pid {
+                continue;
             }
-            Err(e) => last_error = Some((name, e)),
+            match info.open_device(api) {
+                Ok(dev) => {
+                    eprintln!("Opened: {name}");
+                    return Ok(dev);
+                }
+                Err(e) => errors.push(format!("  {name}: {e}")),
+            }
         }
     }
-    if let Some((name, e)) = last_error {
+    if !errors.is_empty() {
         return Err(anyhow!(
-            "Found {name}, but could not open it: {e}\n\
+            "Found a supported device, but could not open it:\n{}\n\
              Check permissions (macOS: Input Monitoring; Linux: udev rules) \
-             and that no other program is using the meter."
+             and that no other program is using the meter.",
+            errors.join("\n")
         ));
     }
     Err(anyhow!(
