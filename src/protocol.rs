@@ -179,19 +179,18 @@ pub fn list_devices(api: &HidApi) {
 
 pub fn open_device(api: &HidApi) -> Result<HidDevice> {
     let mut last_error = None;
-    for info in api.device_list() {
-        if info.vendor_id() != VENDOR_ID {
-            continue;
-        }
-        let Some(name) = product_name(info.product_id()) else {
-            continue;
-        };
-        match info.open_device(api) {
-            Ok(dev) => {
-                eprintln!("Opened: {name}");
-                return Ok(dev);
+    for &(pid, name) in SUPPORTED_DEVICES {
+        for info in api.device_list() {
+            if info.vendor_id() != VENDOR_ID || info.product_id() != pid {
+                continue;
             }
-            Err(e) => last_error = Some((name, e)),
+            match info.open_device(api) {
+                Ok(dev) => {
+                    eprintln!("Opened: {name}");
+                    return Ok(dev);
+                }
+                Err(e) => last_error = Some((name, e)),
+            }
         }
     }
     if let Some((name, e)) = last_error {
