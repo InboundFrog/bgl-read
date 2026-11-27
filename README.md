@@ -92,7 +92,8 @@ warns on stderr and gives a count of the lines it could not parse.
 
 Use `--format` to choose a format. Use `--output FILE` to write to a file
 instead of stdout. `binary` refuses to write to a terminal. Give it `--output`
-or pipe it to another program.
+or pipe it to another program. On Unix, a new output file is private to
+your user (mode 0600). An existing file keeps its mode.
 
 | `--format` | Description                                                            |
 |------------|------------------------------------------------------------------------|
