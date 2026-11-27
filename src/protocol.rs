@@ -317,6 +317,8 @@ struct Message {
     /// Frame content stripped of STX, seq digit, ETX/ETB, checksum, and trailing CR.
     /// Empty for single-byte control messages (ENQ, EOT, ACK, NAK).
     frame: String,
+    /// Frame number (0 to 7) for STX frames. None for control bytes.
+    frame_number: Option<u8>,
 }
 
 /// Read one or more HID packets and join them into one complete ASTM message.
@@ -402,6 +404,7 @@ fn decode_message(buf: &[u8]) -> Result<Message> {
         return Ok(Message {
             msg_type,
             frame: String::new(),
+            frame_number: None,
         });
     }
 
@@ -438,7 +441,12 @@ fn decode_message(buf: &[u8]) -> Result<Message> {
     };
 
     let frame = String::from_utf8_lossy(content).into_owned();
-    Ok(Message { msg_type, frame })
+    let frame_number = buf[1].checked_sub(b'0');
+    Ok(Message {
+        msg_type,
+        frame,
+        frame_number,
+    })
 }
 
 // ── Record parsing ────────────────────────────────────────────────────────────
@@ -743,18 +751,18 @@ pub fn session_from_packets(mut packets: Vec<Packet>) -> Result<Session> {
             continue;
         };
 
-        let (record, raw) = match msg.msg_type {
+        let (record, raw, number) = match msg.msg_type {
             STX => match parse_record(&msg.frame) {
-                Ok(record) => (record, msg.frame),
+                Ok(record) => (record, msg.frame, msg.frame_number),
                 // Superseded by the retry the meter sent after our NAK.
                 Err(_) => continue,
             },
-            EOT => (Record::EndOfTransmission, String::new()),
+            EOT => (Record::EndOfTransmission, String::new(), None),
             // ENQ / ACK / NAK carry no record payload.
             _ => continue,
         };
 
-        if !matches!(builder.push(record, raw), Flow::Continue) {
+        if !matches!(builder.push(record, raw, number), Flow::Continue) {
             break;
         }
     }
@@ -817,7 +825,10 @@ pub fn session_from_records_text(text: &str) -> Session {
 // ── Main session loop ─────────────────────────────────────────────────────────
 
 /// Send one command, receive one complete message, retry with NAK on transient errors.
-fn get_one_record(device: &impl Transport, log: &mut PacketLog) -> Result<(Record, String)> {
+fn get_one_record(
+    device: &impl Transport,
+    log: &mut PacketLog,
+) -> Result<(Record, String, Option<u8>)> {
     // Counts every pass that does not return a record.
     let mut retries = 0u32;
     let mut cmd = ACK;
@@ -840,9 +851,9 @@ fn get_one_record(device: &impl Transport, log: &mut PacketLog) -> Result<(Recor
         };
 
         match msg.msg_type {
-            EOT => return Ok((Record::EndOfTransmission, String::new())),
+            EOT => return Ok((Record::EndOfTransmission, String::new(), None)),
             STX => match parse_record(&msg.frame) {
-                Ok(record) => return Ok((record, msg.frame)),
+                Ok(record) => return Ok((record, msg.frame, msg.frame_number)),
                 Err(e) => {
                     retries += 1;
                     if retries >= MAX_RETRIES {
@@ -927,9 +938,9 @@ fn fetch_all_inner(
     let mut builder = SessionBuilder::new(progress);
 
     loop {
-        let (record, raw) = get_one_record(device, packets)?;
+        let (record, raw, number) = get_one_record(device, packets)?;
 
-        match builder.push(record, raw) {
+        match builder.push(record, raw, number) {
             Flow::Continue => {}
             Flow::Close => {
                 // The L record means the device is done and all readings are
@@ -972,6 +983,10 @@ struct SessionBuilder {
     raw_records: Vec<String>,
     progress: bool,
     saw_terminator: bool,
+    /// Number of the last frame we accepted.
+    last_frame: Option<u8>,
+    /// How many times the frame number jumped by more than one.
+    frame_jumps: u32,
 }
 
 impl SessionBuilder {
@@ -982,11 +997,23 @@ impl SessionBuilder {
             raw_records: Vec::new(),
             progress,
             saw_terminator: false,
+            last_frame: None,
+            frame_jumps: 0,
         }
     }
 
     /// Feed one decoded record and the raw frame text it came from.
-    fn push(&mut self, record: Record, raw: String) -> Flow {
+    fn push(&mut self, record: Record, raw: String, number: Option<u8>) -> Flow {
+        if let Some(n) = number {
+            // Same number and same text: the meter sent this frame again.
+            if self.last_frame == Some(n) && self.raw_records.last() == Some(&raw) {
+                return Flow::Continue;
+            }
+            if self.last_frame.is_some_and(|last| n != (last + 1) % 8) {
+                self.frame_jumps += 1;
+            }
+            self.last_frame = Some(n);
+        }
         if !raw.is_empty() {
             self.raw_records.push(raw);
         }
@@ -1048,6 +1075,16 @@ impl SessionBuilder {
         if self.progress {
             // Move to a fresh line after the progress output
             eprintln!();
+        }
+
+        // This is a warning, not an error, on purpose. We could not check the
+        // numbering on every meter model, and a wrong guess must not make
+        // every read fail.
+        if self.frame_jumps > 0 {
+            eprintln!(
+                "Warning: frame number jumped {} time(s). Some records may be missing.",
+                self.frame_jumps
+            );
         }
 
         if self.raw_records.is_empty() {
@@ -1694,6 +1731,76 @@ mod tests {
         let session = session_from_packets(packets).unwrap();
         assert_eq!(session.raw_records, lines);
         assert_eq!(session.device.model, "ContourTest");
+    }
+
+    /// Index of the first R record in the fixture.
+    fn first_result_index() -> usize {
+        fixture_lines()
+            .iter()
+            .position(|l| l.starts_with('R'))
+            .unwrap()
+    }
+
+    #[test]
+    fn replay_drops_a_repeated_frame() {
+        let lines = fixture_lines();
+        let dup = first_result_index();
+        let mut packets = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            packets.extend(framed((i % 8) as u8, line));
+            if i == dup {
+                packets.extend(framed((i % 8) as u8, line));
+            }
+        }
+        let session = session_from_packets(packets).unwrap();
+        assert_eq!(session.raw_records, lines);
+    }
+
+    #[test]
+    fn builder_counts_frame_number_jumps() {
+        let rec = |t: &str| (parse_record(t).unwrap(), t.to_string());
+        let lines = fixture_lines();
+        let r = lines[first_result_index()];
+        let h = lines[0];
+
+        let mut b = SessionBuilder::new(false);
+        let (rc, raw) = rec(h);
+        b.push(rc, raw, Some(7));
+        let (rc, raw) = rec(r);
+        b.push(rc, raw, Some(0));
+        assert_eq!(b.frame_jumps, 0);
+
+        let (rc, raw) = rec(h);
+        b.push(rc, raw, Some(2));
+        assert_eq!(b.frame_jumps, 1);
+
+        // Same number but different text is a new frame, so it is kept.
+        let kept = b.raw_records.len();
+        let (rc, raw) = rec(r);
+        b.push(rc, raw, Some(2));
+        assert_eq!(b.raw_records.len(), kept + 1);
+        // A repeated number is not last + 1, so it also counts as a jump.
+        assert_eq!(b.frame_jumps, 2);
+    }
+
+    #[test]
+    fn live_session_drops_a_frame_the_meter_sends_twice() {
+        let lines = fixture_lines();
+        let dup = first_result_index();
+        let mut script = script_of(vec![packet(Dir::Rx, &[ENQ])]);
+        // Time out before the first frame, as after a lost reply.
+        script.push(None);
+        for (i, line) in lines.iter().enumerate() {
+            script.extend(script_of(framed((i % 8) as u8, line)));
+            if i == dup {
+                script.extend(script_of(framed((i % 8) as u8, line)));
+            }
+        }
+        script.extend(script_of(vec![packet(Dir::Rx, &[EOT])]));
+
+        let meter = ScriptedMeter::new(script);
+        let session = fetch_all(&meter, false, false).unwrap();
+        assert_eq!(session.raw_records, lines);
     }
 
     #[test]

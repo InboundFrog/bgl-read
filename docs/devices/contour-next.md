@@ -72,6 +72,10 @@ STX  seq  record_text  CR  ETX|ETB  CS1  CS2  CR  LF
 The meter uses `ETB` when one record needs several physical frames. This is
 rare for these meters. `ETX` marks the final frame of a record.
 
+The frame number goes up by one for each new frame and wraps from 7 to 0. A
+frame that is sent again keeps its number. bgl-read drops a frame that repeats
+the last one, and warns when the number jumps.
+
 ### Checksum
 
 Add all bytes from `seq` through `ETX`/`ETB` (inclusive). Take the sum modulo
