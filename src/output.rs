@@ -222,15 +222,15 @@ mod tests {
     #[test]
     fn csv_quotes_formula_cells() {
         use crate::protocol::{Reading, Session};
-        let reading = |analyte: &str, units: &str| Reading {
+        let reading = |analyte: &str, units: &str, timestamp: &str, meal: Option<&str>| Reading {
             analyte: analyte.into(),
             units: units.into(),
-            timestamp: "2020-01-01T09:00:00".into(),
+            timestamp: timestamp.into(),
             record_number: 1,
             value: 5.5,
             high: false,
             low: false,
-            meal_marker: None,
+            meal_marker: meal.map(Into::into),
             is_control: false,
         };
         let render = |r: Reading| {
@@ -242,12 +242,18 @@ mod tests {
             super::write_to(&s, crate::Format::Csv, &mut buf).unwrap();
             String::from_utf8(buf).unwrap()
         };
-        let bad = render(reading("@x", "=1+1"));
+        let bad = render(reading("@x", "=1+1", "=2020", Some("+m")));
         assert!(bad.contains(",'@x,"), "{bad}");
         assert!(bad.contains(",'=1+1,"), "{bad}");
-        let ok = render(reading("Glucose", "mmol/L"));
+        assert!(bad.contains(",'=2020,"), "{bad}");
+        assert!(bad.contains(",'+m"), "{bad}");
+        let ok = render(reading("Glucose", "mmol/L", "2020-01-01T09:00:00", None));
         assert!(ok.contains(",Glucose,"), "{ok}");
         assert!(ok.contains(",mmol/L,"), "{ok}");
         assert!(!ok.contains('\''), "{ok}");
+        assert_eq!(super::csv_safe("-1"), "'-1");
+        assert_eq!(super::csv_safe("\tx"), "'\tx");
+        assert_eq!(super::csv_safe("\rx"), "'\rx");
+        assert_eq!(super::csv_safe("normal"), "normal");
     }
 }
