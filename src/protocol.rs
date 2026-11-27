@@ -1788,11 +1788,11 @@ mod tests {
         let lines = fixture_lines();
         let dup = first_result_index();
         let mut script = script_of(vec![packet(Dir::Rx, &[ENQ])]);
-        // Time out before the first frame, as after a lost reply.
-        script.push(None);
         for (i, line) in lines.iter().enumerate() {
             script.extend(script_of(framed((i % 8) as u8, line)));
             if i == dup {
+                // A timeout makes the host send NAK. The meter then repeats the frame.
+                script.push(None);
                 script.extend(script_of(framed((i % 8) as u8, line)));
             }
         }
