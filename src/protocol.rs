@@ -400,7 +400,7 @@ fn decode_message(buf: &[u8]) -> Result<Message> {
     let computed = compute_checksum(checksum_region);
     if computed != expected {
         return Err(anyhow!(
-            "Checksum mismatch (expected {expected}, computed {computed})"
+            "Checksum mismatch (expected {expected:?}, computed {computed})"
         ));
     }
 
@@ -564,6 +564,8 @@ fn parse_result_record(frame: &str) -> Result<Record> {
 
     // fields[6] is the annotation / marker field, e.g. "A/M0/T1", ">", "C"
     let annotation = fields[6];
+    // A substring match is kept on purpose: the reference driver uses the same
+    // rule (markers.indexOf('C')), and all known markers agree with it.
     let is_control = annotation.contains('C');
     let high = annotation.contains('>');
     let low = annotation.contains('<');
@@ -756,19 +758,31 @@ pub fn session_from_packets(mut packets: Vec<Packet>) -> Result<Session> {
 /// quietly short CSV that looks perfectly valid.
 /// `raw_packets` is left empty — file-driven input has no HID traffic.
 pub fn session_from_records_text(text: &str) -> Session {
+    let (session, controls) = session_and_controls_from_text(text);
+    if controls > 0 {
+        eprintln!("{}", control_skip_message(controls));
+    }
+    session
+}
+
+/// Does the work of `session_from_records_text`. Also returns how many
+/// control readings were left out, so a test can check the count.
+fn session_and_controls_from_text(text: &str) -> (Session, usize) {
     let mut device = DeviceInfo::default();
     let mut readings = Vec::new();
     let mut raw_records = Vec::new();
     let mut unparsed = 0usize;
+    let mut controls = 0usize;
     let mut saw_terminator = false;
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
         raw_records.push(line.to_string());
         match parse_record(line) {
             Ok(Record::Header(info)) => device = info,
             Ok(Record::Result(r)) if !r.is_control => readings.push(r),
+            Ok(Record::Result(_)) => controls += 1,
             Ok(Record::Terminator) => saw_terminator = true,
-            // Control readings and the P/C/O/M/Q/S/L record types are
-            // recognised and deliberately carry nothing into the output.
+            // The P/C/O/M/Q/S/L record types are recognised and
+            // deliberately carry nothing into the output.
             Ok(_) => {}
             Err(e) => {
                 unparsed += 1;
@@ -785,12 +799,19 @@ pub fn session_from_records_text(text: &str) -> Session {
     if !raw_records.is_empty() && !saw_terminator {
         eprintln!("warning: no L (terminator) record found; the dump may be incomplete");
     }
-    Session {
+    let session = Session {
         device,
         readings,
         raw_records,
         raw_packets: Vec::new(),
-    }
+    };
+    (session, controls)
+}
+
+/// One function builds the note, so the live read, the replay and
+/// `--from-records` print exactly the same text.
+fn control_skip_message(n: usize) -> String {
+    format!("note: left out {n} control solution reading(s); they are still in the records output")
 }
 
 // ── Main session loop ─────────────────────────────────────────────────────────
@@ -944,6 +965,7 @@ enum Flow {
 struct SessionBuilder {
     device: DeviceInfo,
     readings: Vec<Reading>,
+    controls: usize,
     raw_records: Vec<String>,
     progress: bool,
     saw_terminator: bool,
@@ -954,6 +976,7 @@ impl SessionBuilder {
         Self {
             device: DeviceInfo::default(),
             readings: Vec::new(),
+            controls: 0,
             raw_records: Vec::new(),
             progress,
             saw_terminator: false,
@@ -981,9 +1004,16 @@ impl SessionBuilder {
 
     fn push_reading(&mut self, r: Reading) {
         if r.is_control {
+            self.controls += 1;
             if self.progress {
-                eprint!("\r{:80}\r", ""); // clear line
-                eprintln!("(skipping control reading #{})", r.record_number);
+                // Write over the open progress line, if any. Padding to the same
+                // width hides its old text. "\r" does nothing at line start, so
+                // no empty line is printed.
+                let width = Self::progress_line(self.readings.len(), self.device.record_count, &r)
+                    .chars()
+                    .count();
+                let note = format!("(skipping control reading #{})", r.record_number);
+                eprintln!("\r{note:<width$}");
             }
             return;
         }
@@ -991,27 +1021,31 @@ impl SessionBuilder {
         if self.progress {
             let total = self.device.record_count;
             let n = self.readings.len() + 1;
-            let pct = (100 * n as u32).checked_div(total).unwrap_or(0);
-            // Pad to a fixed width so a shorter line fully covers the last one.
-            // Format to a String first: escape_debug() ignores width.
-            let line = format!(
-                "[{n:>3}/{total}] {pct:>3}%  {}  {:.1} {}  {}{}",
-                r.timestamp.escape_debug(),
-                r.value,
-                r.units.escape_debug(),
-                if r.high {
-                    "HIGH "
-                } else if r.low {
-                    "LOW  "
-                } else {
-                    "     "
-                },
-                r.meal_marker.as_deref().unwrap_or(""),
-            );
-            eprint!("\r{line:<80}");
+            eprint!("\r{}", Self::progress_line(n, total, &r));
             let _ = std::io::stderr().flush();
         }
         self.readings.push(r);
+    }
+
+    /// Each part has a fixed width, so all lines are the same length and a
+    /// new line fully covers the last one. This works on any terminal width.
+    fn progress_line(n: usize, total: u32, r: &Reading) -> String {
+        let pct = (100 * n as u32).checked_div(total).unwrap_or(0);
+        // Format to Strings first: escape_debug() ignores width.
+        let ts = r.timestamp.escape_debug().to_string();
+        let units = r.units.escape_debug().to_string();
+        let flag = if r.high {
+            "HIGH "
+        } else if r.low {
+            "LOW  "
+        } else {
+            "     "
+        };
+        let meal = r.meal_marker.as_deref().unwrap_or("");
+        format!(
+            "[{n:>3}/{total}] {pct:>3}%  {ts}  {:>5.1} {units:<6}  {flag}{meal:<9}",
+            r.value
+        )
     }
 
     /// `empty_err` is the message for a session that decoded no records at
@@ -1042,6 +1076,9 @@ impl SessionBuilder {
             self.device.model.escape_debug(),
             self.device.serial_number.escape_debug()
         );
+        if self.controls > 0 {
+            eprintln!("{}", control_skip_message(self.controls));
+        }
 
         Ok(Session {
             device: self.device,
@@ -1127,6 +1164,16 @@ mod tests {
         let msg = decode_message(&[EOT, ENQ]).unwrap();
         assert_eq!(msg.msg_type, ENQ);
         assert!(msg.frame.is_empty());
+    }
+
+    /// The checksum bytes come from the device. The error is printed on the
+    /// terminal, so it must not hold a raw ESC byte.
+    #[test]
+    fn decode_checksum_error_escapes_device_bytes() {
+        let frame = [STX, b'1', b'x', CR, ETX, 0x1b, b'c', CR, LF];
+        let err = decode_message(&frame).err().unwrap().to_string();
+        assert!(err.contains("Checksum mismatch"));
+        assert!(!err.contains('\x1b'));
     }
 
     // ── parse_timestamp ───────────────────────────────────────────────────────
@@ -1475,6 +1522,18 @@ mod tests {
     }
 
     #[test]
+    fn records_text_counts_control_readings() {
+        let text = FIXTURE.replace(
+            "L|1||N",
+            "R|7|^^^Glucose|5.5|mmol/L^P||C||20200102100000\nL|1||N",
+        );
+        let (session, controls) = session_and_controls_from_text(&text);
+        assert_eq!(controls, 1);
+        assert!(session.readings.iter().all(|r| !r.is_control));
+        assert_eq!(session.readings.len(), 6);
+    }
+
+    #[test]
     fn control_reading_is_excluded_but_kept_raw() {
         let text = FIXTURE.replace(
             "L|1||N",
@@ -1483,6 +1542,55 @@ mod tests {
         let session = session_from_records_text(&text);
         assert_eq!(session.readings.len(), 6);
         assert!(session.raw_records.iter().any(|l| l.starts_with("R|7|")));
+    }
+
+    #[test]
+    fn push_reading_counts_control_readings() {
+        let mut b = SessionBuilder::new(false);
+        let mk = |ann: &str| {
+            let frame = format!("R|1|^^^Glucose|5.5|mmol/L^P||{ann}||20200102100000");
+            match parse_record(&frame).unwrap() {
+                Record::Result(r) => r,
+                _ => panic!("not a result"),
+            }
+        };
+        b.push_reading(mk("C"));
+        b.push_reading(mk("B"));
+        assert_eq!(b.controls, 1);
+        assert_eq!(b.readings.len(), 1);
+    }
+
+    #[test]
+    fn progress_line_has_fixed_width() {
+        let mk = |value: f64, meal: Option<&str>| {
+            let mut r =
+                match parse_record("R|1|^^^Glucose|5.5|mmol/L^P||B||20200102100000").unwrap() {
+                    Record::Result(r) => r,
+                    _ => panic!("not a result"),
+                };
+            r.value = value;
+            r.meal_marker = meal.map(String::from);
+            r
+        };
+        let base = SessionBuilder::progress_line(1, 800, &mk(5.4, None))
+            .chars()
+            .count();
+        for v in [5.4, 19.0, 601.0] {
+            for meal in [None, Some("post-meal")] {
+                let line = SessionBuilder::progress_line(1, 800, &mk(v, meal));
+                assert_eq!(line.chars().count(), base, "{line:?}");
+                assert!(line.chars().count() <= 79);
+            }
+        }
+        // The flag texts are padded by hand, so check them too.
+        let mut high = mk(5.4, None);
+        high.high = true;
+        let mut low = mk(5.4, None);
+        low.low = true;
+        for r in [high, low] {
+            let line = SessionBuilder::progress_line(1, 800, &r);
+            assert_eq!(line.chars().count(), base, "{line:?}");
+        }
     }
 
     #[test]
