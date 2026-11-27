@@ -563,6 +563,8 @@ fn parse_result_record(frame: &str) -> Result<Record> {
 
     // fields[6] is the annotation / marker field, e.g. "A/M0/T1", ">", "C"
     let annotation = fields[6];
+    // A substring match is kept on purpose: the reference driver uses the same
+    // rule (markers.indexOf('C')), and all known markers agree with it.
     let is_control = annotation.contains('C');
     let high = annotation.contains('>');
     let low = annotation.contains('<');
@@ -759,15 +761,17 @@ pub fn session_from_records_text(text: &str) -> Session {
     let mut readings = Vec::new();
     let mut raw_records = Vec::new();
     let mut unparsed = 0usize;
+    let mut controls = 0usize;
     let mut saw_terminator = false;
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
         raw_records.push(line.to_string());
         match parse_record(line) {
             Ok(Record::Header(info)) => device = info,
             Ok(Record::Result(r)) if !r.is_control => readings.push(r),
+            Ok(Record::Result(_)) => controls += 1,
             Ok(Record::Terminator) => saw_terminator = true,
-            // Control readings and the P/C/O/M/Q/S/L record types are
-            // recognised and deliberately carry nothing into the output.
+            // The P/C/O/M/Q/S/L record types are recognised and
+            // deliberately carry nothing into the output.
             Ok(_) => {}
             Err(e) => {
                 unparsed += 1;
@@ -784,12 +788,20 @@ pub fn session_from_records_text(text: &str) -> Session {
     if !raw_records.is_empty() && !saw_terminator {
         eprintln!("warning: no L (terminator) record found; the dump may be incomplete");
     }
+    if controls > 0 {
+        eprintln!("{}", control_skip_message(controls));
+    }
     Session {
         device,
         readings,
         raw_records,
         raw_packets: Vec::new(),
     }
+}
+
+/// Control solution readings are not output, so say how many were left out.
+fn control_skip_message(n: usize) -> String {
+    format!("note: left out {n} control solution reading(s); they are still in the records output")
 }
 
 // ── Main session loop ─────────────────────────────────────────────────────────
@@ -943,6 +955,7 @@ enum Flow {
 struct SessionBuilder {
     device: DeviceInfo,
     readings: Vec<Reading>,
+    controls: usize,
     raw_records: Vec<String>,
     progress: bool,
     saw_terminator: bool,
@@ -953,6 +966,7 @@ impl SessionBuilder {
         Self {
             device: DeviceInfo::default(),
             readings: Vec::new(),
+            controls: 0,
             raw_records: Vec::new(),
             progress,
             saw_terminator: false,
@@ -980,6 +994,7 @@ impl SessionBuilder {
 
     fn push_reading(&mut self, r: Reading) {
         if r.is_control {
+            self.controls += 1;
             if self.progress {
                 eprint!("\r{:80}\r", ""); // clear line
                 eprintln!("(skipping control reading #{})", r.record_number);
@@ -1041,6 +1056,9 @@ impl SessionBuilder {
             self.device.model.escape_debug(),
             self.device.serial_number.escape_debug()
         );
+        if self.controls > 0 {
+            eprintln!("{}", control_skip_message(self.controls));
+        }
 
         Ok(Session {
             device: self.device,
@@ -1486,6 +1504,22 @@ mod tests {
         let session = session_from_records_text(&text);
         assert_eq!(session.readings.len(), 6);
         assert!(session.raw_records.iter().any(|l| l.starts_with("R|7|")));
+    }
+
+    #[test]
+    fn push_reading_counts_control_readings() {
+        let mut b = SessionBuilder::new(false);
+        let mk = |ann: &str| {
+            let frame = format!("R|1|^^^Glucose|5.5|mmol/L^P||{ann}||20200102100000");
+            match parse_record(&frame).unwrap() {
+                Record::Result(r) => r,
+                _ => panic!("not a result"),
+            }
+        };
+        b.push_reading(mk("C"));
+        b.push_reading(mk("B"));
+        assert_eq!(b.controls, 1);
+        assert_eq!(b.readings.len(), 1);
     }
 
     #[test]
