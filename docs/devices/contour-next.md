@@ -119,10 +119,19 @@ meter → host   EOT
 A meter can send `EOT` and `ENQ` together in one packet when a new session
 starts right after an old one. `bgl-read` treats that packet as `ENQ`.
 
-**Contour Next One quirk:** this model does not reply with an `ACK` to the
-host's first `ACK`. It does not expect an `EOT` command before the `NAK` phase
-that sets the date and time. Other models differ. See the original
-[Tidepool driver source][driver] for the branch of each model.
+**Ending the session:** after the L record, the host sends `ACK`. The
+Contour Next One does not reply to this `ACK`, so `bgl-read` does not wait
+for a reply. It then sends `NAK`, and the meter replies with `EOT`. `bgl-read`
+waits a short time for that `EOT` and ignores a failure, because it has
+already read all the readings.
+
+This follows the reference [Tidepool driver][driver]. For most models, that
+driver sends `EOT` between this `ACK` and the `NAK`. It does not do this for
+the Contour Next One, Contour Plus One, Contour Plus Blue and Contour7900,
+which do not expect `EOT` here. The driver then goes on to set the meter
+clock. `bgl-read` never sends `EOT` and never sets the clock. It uses the
+`ACK` and `NAK` only to end the session. This is untested on the models that
+expect `EOT`.
 
 [driver]: https://github.com/tidepool-org/uploader/blob/master/lib/drivers/bayer/bayerContourNext.js
 
