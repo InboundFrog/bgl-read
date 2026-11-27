@@ -1947,8 +1947,10 @@ mod tests {
             let frame = framed((i % 8) as u8, line);
             if i == 2 {
                 let mut broken = frame.clone();
-                // Change the sequence digit. It is inside the checksum range.
-                broken[0].data[PKT_DATA_OFFSET + 1] = b'9';
+                // Break the last checksum character, just before CR LF.
+                let last = broken.last_mut().unwrap();
+                let size = last.data[PKT_SIZE_OFFSET] as usize;
+                last.data[PKT_DATA_OFFSET + size - 3] = b'?';
                 script.extend(script_of(broken));
             }
             script.extend(script_of(frame));
@@ -1959,7 +1961,7 @@ mod tests {
         let session = fetch_all(&meter, false, false).unwrap();
 
         assert_eq!(session.raw_records, lines);
-        assert!(meter.sent().contains(&NAK));
+        assert!(meter.sent()[..meter.sent().len() - 1].contains(&NAK));
     }
 
     #[test]
