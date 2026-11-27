@@ -128,8 +128,9 @@ already read all the readings.
 This follows the reference [Tidepool driver][driver]. For most models, that
 driver sends `EOT` between this `ACK` and the `NAK`. It does not do this for
 the Contour Next One, Contour Plus One, Contour Plus Blue and Contour7900,
-which do not expect `EOT` here. The driver then goes on to set the meter
-clock. `bgl-read` never sends `EOT` and never sets the clock. It uses the
+which do not expect `EOT` here. In that driver, this exchange is the first
+part of the step that sets the meter clock, and it runs only when the clock is
+wrong. `bgl-read` never sends `EOT` and never sets the clock. It uses the
 `ACK` and `NAK` only to end the session. This is untested on the models that
 expect `EOT`.
 
