@@ -23,7 +23,14 @@ pub enum Format {
 pub fn write(session: &Session, format: Format, path: Option<&Path>) -> Result<()> {
     match path {
         Some(p) => {
-            let f = std::fs::File::create(p)?;
+            // The file holds health data and the meter password, so keep it
+            // private. The mode applies only to new files. An existing file
+            // keeps its mode.
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+            let f = opts.open(p)?;
             write_to(session, format, BufWriter::new(f))
         }
         None => {
@@ -179,6 +186,24 @@ mod tests {
         // The record is smaller than the buffer, so only the flush can fail.
         let w = BufWriter::new(FailingWriter);
         assert!(write_to(&session, Format::Records, w).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_creates_private_file() {
+        use super::write;
+        use std::os::unix::fs::PermissionsExt;
+        let session = Session {
+            raw_records: vec!["H|test".to_string()],
+            ..Default::default()
+        };
+        let path = std::env::temp_dir().join(format!("bgl-read-private-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let written = write(&session, Format::Records, Some(&path));
+        let mode = std::fs::metadata(&path).map(|m| m.permissions().mode());
+        let _ = std::fs::remove_file(&path);
+        written.unwrap();
+        assert_eq!(mode.unwrap() & 0o077, 0);
     }
 
     fn dump(data: &[u8]) -> String {
