@@ -399,7 +399,7 @@ fn decode_message(buf: &[u8]) -> Result<Message> {
     let computed = compute_checksum(checksum_region);
     if computed != expected {
         return Err(anyhow!(
-            "Checksum mismatch (expected {expected}, computed {computed})"
+            "Checksum mismatch (expected {expected:?}, computed {computed})"
         ));
     }
 
@@ -1126,6 +1126,16 @@ mod tests {
         let msg = decode_message(&[EOT, ENQ]).unwrap();
         assert_eq!(msg.msg_type, ENQ);
         assert!(msg.frame.is_empty());
+    }
+
+    /// The checksum bytes come from the device. The error is printed on the
+    /// terminal, so it must not hold a raw ESC byte.
+    #[test]
+    fn decode_checksum_error_escapes_device_bytes() {
+        let frame = [STX, b'1', b'x', CR, ETX, 0x1b, b'c', CR, LF];
+        let err = decode_message(&frame).err().unwrap().to_string();
+        assert!(err.contains("Checksum mismatch"));
+        assert!(!err.contains('\x1b'));
     }
 
     // ── parse_timestamp ───────────────────────────────────────────────────────
