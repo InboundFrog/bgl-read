@@ -1647,9 +1647,12 @@ mod tests {
             for meal in [None, Some("post-meal")] {
                 let line = SessionBuilder::progress_line(1, 800, &mk(v, meal));
                 assert_eq!(line.chars().count(), base, "{line:?}");
-                assert!(line.chars().count() <= 79);
+                // 70 is the width the README states.
+                assert!(line.chars().count() <= 70);
             }
         }
+        let big = SessionBuilder::progress_line(1000, 2000, &mk(601.0, Some("post-meal")));
+        assert!(big.chars().count() <= 70, "{big:?}");
         // The flag texts are padded by hand, so check them too.
         let mut high = mk(5.4, None);
         high.high = true;
