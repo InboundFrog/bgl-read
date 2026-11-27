@@ -1005,8 +1005,14 @@ impl SessionBuilder {
         if r.is_control {
             self.controls += 1;
             if self.progress {
-                // Start a new line, so the note does not overwrite the progress line.
-                eprintln!("\n(skipping control reading #{})", r.record_number);
+                // Write over the open progress line, if any. Padding to the same
+                // width hides its old text. "\r" does nothing at line start, so
+                // no empty line is printed.
+                let width = Self::progress_line(self.readings.len(), self.device.record_count, &r)
+                    .chars()
+                    .count();
+                let note = format!("(skipping control reading #{})", r.record_number);
+                eprintln!("\r{note:<width$}");
             }
             return;
         }
