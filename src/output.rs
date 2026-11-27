@@ -40,7 +40,11 @@ fn write_to<W: Write>(session: &Session, format: Format, mut w: W) -> Result<()>
         Format::Records => write_records(session, &mut w),
         Format::Bytes => write_bytes(session, &mut w),
         Format::Binary => write_binary(session, &mut w),
-    }
+    }?;
+    // BufWriter ignores write errors when it is dropped. Flush here so
+    // that a full disk or a closed pipe is reported.
+    w.flush()?;
+    Ok(())
 }
 
 // ── JSON ──────────────────────────────────────────────────────────────────────
@@ -141,7 +145,41 @@ fn hex_dump<W: Write>(data: &[u8], w: &mut W) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::hex_dump;
+    use super::{Format, hex_dump, write_to};
+    use crate::protocol::{DeviceInfo, Session};
+    use std::io::{self, BufWriter, Write};
+
+    /// A writer that accepts no data and fails on flush.
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("write failed"))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::other("flush failed"))
+        }
+    }
+
+    #[test]
+    fn write_to_reports_flush_error() {
+        let session = Session {
+            device: DeviceInfo {
+                model: String::new(),
+                serial_number: String::new(),
+                record_count: 0,
+                device_time: String::new(),
+                low_threshold: 0,
+                high_threshold: 0,
+            },
+            readings: vec![],
+            raw_records: vec!["H|test".to_string()],
+            raw_packets: vec![],
+        };
+        // The record is smaller than the buffer, so only the flush can fail.
+        let w = BufWriter::new(FailingWriter);
+        assert!(write_to(&session, Format::Records, w).is_err());
+    }
 
     fn dump(data: &[u8]) -> String {
         let mut buf = Vec::new();
