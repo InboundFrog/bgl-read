@@ -53,10 +53,10 @@ const CR: u8 = 0x0D;
 const HID_PACKET_SIZE: usize = 64;
 // Maximum data bytes per HID packet = 64 total - 4 overhead (3 header + 1 length byte)
 const MAX_PAYLOAD: usize = HID_PACKET_SIZE - 4;
-/// Transient I/O retries (receive_message returned Err).
-const IO_RETRIES: u32 = 6;
-/// Protocol-violation retries (unexpected message type or parse failure).
-const PROTO_RETRIES: u32 = 6;
+/// Most passes of the receive loop that may end without a record.
+/// Receive errors, parse errors, unexpected bytes, ENQ and ACK all count.
+/// A normal start needs one or two passes, so 6 leaves room.
+const MAX_RETRIES: u32 = 6;
 const RECEIVE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Timeout for the meter's EOT reply during the NAK close handshake.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -525,8 +525,15 @@ fn parse_result_record(frame: &str) -> Result<Record> {
         return Ok(Record::Skip);
     }
 
-    let record_number: u32 = fields[1].parse().unwrap_or(0);
-    let value: f64 = fields[3].parse().unwrap_or(0.0);
+    // A bad number must be an error. Using a default would invent a reading.
+    let record_number: u32 = fields[1]
+        .trim()
+        .parse()
+        .map_err(|_| anyhow!("bad record number in R record: {frame:?}"))?;
+    let value: f64 = match fields[3].trim().parse::<f64>() {
+        Ok(v) if v.is_finite() && v >= 0.0 => v,
+        _ => return Err(anyhow!("unreadable value in R record: {frame:?}")),
+    };
     let units = fields[4].split('^').next().unwrap_or("mg/dL").to_string();
 
     // fields[6] is the annotation / marker field, e.g. "A/M0/T1", ">", "C"
@@ -670,14 +677,21 @@ pub fn decode_packets(bytes: &[u8]) -> Result<Vec<Packet>> {
 /// Rebuild a Session by replaying captured HID packets through the same
 /// framing and record parsing the live read uses.
 ///
-/// Only RX packets carry meter data — TX entries are our own ACK/NAK traffic.
+/// Only RX packets carry meter data. TX entries are our own ACK/NAK traffic.
+/// A TX packet also marks the start of a new receive: the live read always
+/// writes before it reads, and it drops any half-read message. Replay does the
+/// same, so a partial message cannot corrupt the meter's resend.
 /// Messages that fail to decode are skipped: in the live session those were
 /// NAK'd and retried, so the retry's good copy appears later in the stream.
 pub fn session_from_packets(packets: Vec<Packet>) -> Result<Session> {
     let mut asm = MessageAssembler::new();
     let mut builder = SessionBuilder::new(false);
 
-    for pkt in packets.iter().filter(|p| matches!(p.dir, Dir::Rx)) {
+    for pkt in &packets {
+        if matches!(pkt.dir, Dir::Tx) {
+            asm = MessageAssembler::new();
+            continue;
+        }
         let Some(Ok(msg)) = asm.push(&pkt.data) else {
             continue;
         };
@@ -768,6 +782,7 @@ pub fn session_from_records_text(text: &str) -> Session {
 
 /// Send one command, receive one complete message, retry with NAK on transient errors.
 fn get_one_record(device: &HidDevice, log: &mut PacketLog) -> Result<(Record, String)> {
+    // Counts every pass that does not return a record.
     let mut retries = 0u32;
     let mut cmd = ACK;
 
@@ -779,38 +794,47 @@ fn get_one_record(device: &HidDevice, log: &mut PacketLog) -> Result<(Record, St
             Ok(m) => m,
             Err(e) => {
                 retries += 1;
-                if retries >= IO_RETRIES {
+                if retries >= MAX_RETRIES {
                     return Err(e);
                 }
-                eprintln!("Receive error ({retries}/{IO_RETRIES}): {e}");
+                eprintln!("Receive error ({retries}/{MAX_RETRIES}): {e}");
                 cmd = NAK;
                 continue;
             }
         };
 
         match msg.msg_type {
-            // Device signalling it's ready to send — ACK and loop to get actual data
-            ENQ => continue,
             EOT => return Ok((Record::EndOfTransmission, String::new())),
-            ACK => continue,
             STX => match parse_record(&msg.frame) {
                 Ok(record) => return Ok((record, msg.frame)),
                 Err(e) => {
                     retries += 1;
-                    if retries >= PROTO_RETRIES {
+                    if retries >= MAX_RETRIES {
                         return Err(e);
                     }
-                    eprintln!("Parse error ({retries}/{PROTO_RETRIES}): {e}");
+                    eprintln!("Parse error ({retries}/{MAX_RETRIES}): {e}");
                     cmd = NAK;
                 }
             },
-            other => {
+            // ENQ or ACK: the meter is not ready to send yet. ACK again, but
+            // count the pass so a device that never sends data cannot loop forever.
+            ENQ | ACK => {
                 retries += 1;
-                if retries >= PROTO_RETRIES {
+                if retries >= MAX_RETRIES {
                     return Err(anyhow!(
-                        "Unexpected message byte {other:#04x} after {PROTO_RETRIES} retries"
+                        "Meter sent {:#04x} {MAX_RETRIES} times but no data",
+                        msg.msg_type
                     ));
                 }
+            }
+            other => {
+                retries += 1;
+                if retries >= MAX_RETRIES {
+                    return Err(anyhow!(
+                        "Unexpected message byte {other:#04x} after {MAX_RETRIES} retries"
+                    ));
+                }
+                eprintln!("Unexpected message byte {other:#04x} ({retries}/{MAX_RETRIES})");
                 cmd = NAK;
             }
         }
@@ -1279,6 +1303,20 @@ mod tests {
         assert!(r.is_control);
     }
 
+    #[test]
+    fn result_unreadable_value_is_error() {
+        for v in ["HI", "", "NaN", "inf", "-1"] {
+            let frame = format!("R|1|^^^Glucose|{v}|mg/dL^P||A/M0/T1||201505261150");
+            assert!(parse_result_record(&frame).is_err(), "value {v:?}");
+        }
+    }
+
+    #[test]
+    fn result_bad_record_number_is_error() {
+        let frame = "R|x|^^^Glucose|93|mg/dL^P||A/M0/T1||201505261150";
+        assert!(parse_result_record(frame).is_err());
+    }
+
     // ── parse_header ──────────────────────────────────────────────────────────
 
     #[test]
@@ -1574,6 +1612,28 @@ mod tests {
 
         let session = session_from_packets(packets).unwrap();
         assert_eq!(session.raw_records, lines, "retried frame must not appear");
+    }
+
+    #[test]
+    fn replay_drops_partial_message_before_a_resend() {
+        let lines = fixture_lines();
+        let mut packets = vec![packet(Dir::Tx, &[ACK])];
+        for (i, line) in lines.iter().enumerate() {
+            let frame = framed((i % 8) as u8, line);
+            if i == 0 {
+                // The read timed out after the first packet. We sent NAK and
+                // the meter sent the whole message again.
+                assert!(frame.len() > 1, "H record must span several packets");
+                packets.push(frame[0].clone());
+                packets.push(packet(Dir::Tx, &[NAK]));
+            }
+            packets.extend(frame);
+        }
+        packets.push(packet(Dir::Rx, &[EOT]));
+
+        let session = session_from_packets(packets).unwrap();
+        assert_eq!(session.raw_records, lines);
+        assert_eq!(session.device.model, "ContourTest");
     }
 
     #[test]
