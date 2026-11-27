@@ -1565,13 +1565,24 @@ mod tests {
             r.meal_marker = meal.map(String::from);
             r
         };
-        let base = SessionBuilder::progress_line(1, 800, &mk(5.4, None)).len();
+        let base = SessionBuilder::progress_line(1, 800, &mk(5.4, None))
+            .chars()
+            .count();
         for v in [5.4, 19.0, 601.0] {
             for meal in [None, Some("post-meal")] {
                 let line = SessionBuilder::progress_line(1, 800, &mk(v, meal));
-                assert_eq!(line.len(), base, "{line:?}");
-                assert!(line.len() <= 79);
+                assert_eq!(line.chars().count(), base, "{line:?}");
+                assert!(line.chars().count() <= 79);
             }
+        }
+        // The flag texts are padded by hand, so check them too.
+        let mut high = mk(5.4, None);
+        high.high = true;
+        let mut low = mk(5.4, None);
+        low.low = true;
+        for r in [high, low] {
+            let line = SessionBuilder::progress_line(1, 800, &r);
+            assert_eq!(line.chars().count(), base, "{line:?}");
         }
     }
 
