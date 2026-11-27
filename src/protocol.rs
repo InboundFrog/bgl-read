@@ -255,7 +255,25 @@ impl PacketLog {
     }
 }
 
-fn hid_write(device: &HidDevice, data: &[u8], log: &mut PacketLog) -> Result<()> {
+/// The two device calls the session loop needs. A test can replace the real
+/// meter with a scripted one, because the loop only sees this trait.
+pub(crate) trait Transport {
+    fn write(&self, data: &[u8]) -> Result<()>;
+    fn read_timeout(&self, buf: &mut [u8], timeout_ms: i32) -> Result<usize>;
+}
+
+impl Transport for HidDevice {
+    fn write(&self, data: &[u8]) -> Result<()> {
+        HidDevice::write(self, data)?;
+        Ok(())
+    }
+
+    fn read_timeout(&self, buf: &mut [u8], timeout_ms: i32) -> Result<usize> {
+        Ok(HidDevice::read_timeout(self, buf, timeout_ms)?)
+    }
+}
+
+fn hid_write(device: &impl Transport, data: &[u8], log: &mut PacketLog) -> Result<()> {
     let pkt = build_write_packet(data);
     // Log without the report-ID byte
     let tx_data: [u8; HID_PACKET_SIZE] =
@@ -270,7 +288,7 @@ fn hid_write(device: &HidDevice, data: &[u8], log: &mut PacketLog) -> Result<()>
 
 /// Read one 64-byte HID packet with a deadline.
 fn hid_read(
-    device: &HidDevice,
+    device: &impl Transport,
     deadline: Instant,
     log: &mut PacketLog,
 ) -> Result<[u8; HID_PACKET_SIZE]> {
@@ -309,7 +327,11 @@ struct Message {
 ///   - The first data byte is a single-byte control character (ENQ, EOT, ACK, NAK).
 ///   - The data ends with the ASTM tail:  … CR  ETX|ETB  CS1 CS2  CR  LF
 ///     In that case ETX/ETB is at data[SIZE-5] (= pkt[SIZE-1] from the start of the packet).
-fn receive_message(device: &HidDevice, timeout: Duration, log: &mut PacketLog) -> Result<Message> {
+fn receive_message(
+    device: &impl Transport,
+    timeout: Duration,
+    log: &mut PacketLog,
+) -> Result<Message> {
     let deadline = Instant::now() + timeout;
     let mut asm = MessageAssembler::new();
 
@@ -817,7 +839,7 @@ fn control_skip_message(n: usize) -> String {
 // ── Main session loop ─────────────────────────────────────────────────────────
 
 /// Send one command, receive one complete message, retry with NAK on transient errors.
-fn get_one_record(device: &HidDevice, log: &mut PacketLog) -> Result<(Record, String)> {
+fn get_one_record(device: &impl Transport, log: &mut PacketLog) -> Result<(Record, String)> {
     // Counts every pass that does not return a record.
     let mut retries = 0u32;
     let mut cmd = ACK;
@@ -893,7 +915,7 @@ pub struct FetchError {
 /// also notes the Contour Next One must NOT be sent EOT. Without this the
 /// meter sits silent until our receive timeout, adding ~10s to every
 /// session. Best-effort: all readings are already captured at this point.
-fn close_session(device: &HidDevice, log: &mut PacketLog) {
+fn close_session(device: &impl Transport, log: &mut PacketLog) {
     if hid_write(device, &[ACK], log).is_err() {
         return;
     }
@@ -908,7 +930,7 @@ fn close_session(device: &HidDevice, log: &mut PacketLog) {
 /// On failure the captured packet log survives inside [`FetchError`] —
 /// failure modes are exactly when a `--format bytes` dump is most useful.
 pub fn fetch_all(
-    device: &HidDevice,
+    device: &impl Transport,
     progress: bool,
     capture_packets: bool,
 ) -> Result<Session, FetchError> {
@@ -919,7 +941,11 @@ pub fn fetch_all(
     })
 }
 
-fn fetch_all_inner(device: &HidDevice, progress: bool, packets: &mut PacketLog) -> Result<Session> {
+fn fetch_all_inner(
+    device: &impl Transport,
+    progress: bool,
+    packets: &mut PacketLog,
+) -> Result<Session> {
     let mut builder = SessionBuilder::new(progress);
 
     loop {
