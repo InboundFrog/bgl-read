@@ -61,6 +61,16 @@ fn write_json<W: Write>(session: &Session, w: &mut W) -> Result<()> {
 
 // ── CSV ───────────────────────────────────────────────────────────────────────
 
+/// Text from the meter or an input file can start with a character that a
+/// spreadsheet runs as a formula. A leading quote makes it plain text.
+fn csv_safe(cell: &str) -> String {
+    if cell.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+        format!("'{cell}")
+    } else {
+        cell.to_string()
+    }
+}
+
 fn write_csv<W: Write>(session: &Session, w: &mut W) -> Result<()> {
     let mut wtr = csv::Writer::from_writer(w);
     wtr.write_record([
@@ -76,13 +86,13 @@ fn write_csv<W: Write>(session: &Session, w: &mut W) -> Result<()> {
     for r in &session.readings {
         wtr.write_record([
             r.record_number.to_string(),
-            r.timestamp.clone(),
-            r.analyte.clone(),
+            csv_safe(&r.timestamp),
+            csv_safe(&r.analyte),
             r.value.to_string(),
-            r.units.clone(),
+            csv_safe(&r.units),
             r.high.to_string(),
             r.low.to_string(),
-            r.meal_marker.clone().unwrap_or_default(),
+            csv_safe(r.meal_marker.as_deref().unwrap_or_default()),
         ])?;
     }
     wtr.flush()?;
@@ -207,5 +217,37 @@ mod tests {
 0010  10 11 12 13                                       |....|
 ";
         assert_eq!(dump(&data), expected);
+    }
+
+    #[test]
+    fn csv_quotes_formula_cells() {
+        use crate::protocol::{Reading, Session};
+        let reading = |analyte: &str, units: &str| Reading {
+            analyte: analyte.into(),
+            units: units.into(),
+            timestamp: "2020-01-01T09:00:00".into(),
+            record_number: 1,
+            value: 5.5,
+            high: false,
+            low: false,
+            meal_marker: None,
+            is_control: false,
+        };
+        let render = |r: Reading| {
+            let s = Session {
+                readings: vec![r],
+                ..Default::default()
+            };
+            let mut buf = Vec::new();
+            super::write_to(&s, crate::Format::Csv, &mut buf).unwrap();
+            String::from_utf8(buf).unwrap()
+        };
+        let bad = render(reading("@x", "=1+1"));
+        assert!(bad.contains(",'@x,"), "{bad}");
+        assert!(bad.contains(",'=1+1,"), "{bad}");
+        let ok = render(reading("Glucose", "mmol/L"));
+        assert!(ok.contains(",Glucose,"), "{ok}");
+        assert!(ok.contains(",mmol/L,"), "{ok}");
+        assert!(!ok.contains('\''), "{ok}");
     }
 }
