@@ -880,7 +880,7 @@ fn get_one_record(device: &impl Transport, log: &mut PacketLog) -> Result<(Recor
                 retries += 1;
                 if retries >= MAX_RETRIES {
                     return Err(anyhow!(
-                        "Meter sent {:#04x} {MAX_RETRIES} times but no data",
+                        "No data after {MAX_RETRIES} tries; the last reply was {:#04x}, not data",
                         msg.msg_type
                     ));
                 }
@@ -2002,6 +2002,23 @@ mod tests {
             err.error.to_string().contains("incomplete"),
             "got: {}",
             err.error
+        );
+    }
+
+    #[test]
+    fn live_session_error_names_the_last_reply_not_a_false_count() {
+        let enq = packet(Dir::Rx, &[ENQ]).data;
+        let mut script = vec![None];
+        script.extend(vec![Some(enq); 3 * MAX_RETRIES as usize]);
+        let meter = ScriptedMeter::new(script);
+        let err = fetch_all(&meter, false, false).unwrap_err();
+
+        let text = err.error.to_string();
+        assert_eq!(meter.sent().len(), MAX_RETRIES as usize);
+        assert!(text.contains("0x05"), "got: {text}");
+        assert!(
+            !text.contains(&format!("sent 0x05 {MAX_RETRIES} times")),
+            "got: {text}"
         );
     }
 }
