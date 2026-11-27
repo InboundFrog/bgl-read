@@ -64,7 +64,12 @@ fn write_json<W: Write>(session: &Session, w: &mut W) -> Result<()> {
 /// Text from the meter or an input file can start with a character that a
 /// spreadsheet runs as a formula. A leading quote makes it plain text.
 fn csv_safe(cell: &str) -> String {
-    if cell.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+    // The four U+FF.. chars are the full-width equals, plus, hyphen-minus
+    // and at sign.
+    let lead = [
+        '=', '+', '-', '@', '\t', '\r', '\n', '\u{FF1D}', '\u{FF0B}', '\u{FF0D}', '\u{FF20}',
+    ];
+    if cell.starts_with(lead) {
         format!("'{cell}")
     } else {
         cell.to_string()
@@ -254,6 +259,11 @@ mod tests {
         assert_eq!(super::csv_safe("-1"), "'-1");
         assert_eq!(super::csv_safe("\tx"), "'\tx");
         assert_eq!(super::csv_safe("\rx"), "'\rx");
+        assert_eq!(super::csv_safe("\nx"), "'\nx");
+        assert_eq!(super::csv_safe("\u{FF1D}x"), "'\u{FF1D}x");
+        assert_eq!(super::csv_safe("\u{FF0B}x"), "'\u{FF0B}x");
+        assert_eq!(super::csv_safe("\u{FF0D}x"), "'\u{FF0D}x");
+        assert_eq!(super::csv_safe("\u{FF20}x"), "'\u{FF20}x");
         assert_eq!(super::csv_safe("normal"), "normal");
     }
 }
