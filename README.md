@@ -60,6 +60,11 @@ bgl-read --format binary --progress --output session.bin
 bgl-read --from-bytes session.bin --format csv --output readings.csv
 ```
 
+The progress line is up to 67 columns wide, so use a terminal at least 70
+columns wide. On a narrower terminal the line can wrap, and then each reading
+prints on its own line. This is by design: the tool does not check the
+terminal size.
+
 ### Reading the meter only once
 
 Each run that talks to the meter transfers up to 800 records. Before, four

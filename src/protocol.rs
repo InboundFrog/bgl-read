@@ -1081,7 +1081,12 @@ impl SessionBuilder {
     }
 
     /// Each part has a fixed width, so all lines are the same length and a
-    /// new line fully covers the last one. This works on any terminal width.
+    /// new line fully covers the last one.
+    ///
+    /// The line is about 65 columns wide. It is at most 67 columns for a
+    /// meter with 1000 or more readings. On a narrower terminal the line
+    /// wraps, and each reading then prints on its own row. This is by
+    /// design: the tool does not check the terminal size.
     fn progress_line(n: usize, total: u32, r: &Reading) -> String {
         let pct = (100 * n as u32).checked_div(total).unwrap_or(0);
         // Format to Strings first: escape_debug() ignores width.
@@ -1642,9 +1647,14 @@ mod tests {
             for meal in [None, Some("post-meal")] {
                 let line = SessionBuilder::progress_line(1, 800, &mk(v, meal));
                 assert_eq!(line.chars().count(), base, "{line:?}");
-                assert!(line.chars().count() <= 79);
             }
         }
+        // The doc comment on progress_line states these two widths.
+        assert_eq!(base, 65);
+        let big = SessionBuilder::progress_line(1000, 2000, &mk(601.0, Some("post-meal")));
+        assert_eq!(big.chars().count(), 67, "{big:?}");
+        // 70 is the width the README states.
+        assert!(big.chars().count() <= 70, "{big:?}");
         // The flag texts are padded by hand, so check them too.
         let mut high = mk(5.4, None);
         high.high = true;
