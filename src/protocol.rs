@@ -362,8 +362,17 @@ impl MessageAssembler {
     /// complete message, resetting for the next one.
     fn push(&mut self, pkt: &[u8; HID_PACKET_SIZE]) -> Option<Result<Message>> {
         let size = pkt[PKT_SIZE_OFFSET] as usize;
-        let data_end = (PKT_DATA_OFFSET + size).min(HID_PACKET_SIZE);
-        self.buf.extend_from_slice(&pkt[PKT_DATA_OFFSET..data_end]);
+        // A packet holds at most MAX_PAYLOAD data bytes, so a larger SIZE is
+        // corruption rather than a continuation. Treating it as one is what
+        // used to turn a damaged packet into a short reading list.
+        if size > MAX_PAYLOAD {
+            self.buf.clear();
+            return Some(Err(anyhow!(
+                "Corrupt HID packet: SIZE byte {size} exceeds the {MAX_PAYLOAD}-byte maximum"
+            )));
+        }
+        self.buf
+            .extend_from_slice(&pkt[PKT_DATA_OFFSET..PKT_DATA_OFFSET + size]);
 
         if self.buf.len() > MAX_MESSAGE_SIZE {
             self.buf.clear();
@@ -718,16 +727,22 @@ pub fn decode_packets(bytes: &[u8]) -> Result<Vec<Packet>> {
     }
 
     body.chunks_exact(stride)
-        .map(|chunk| {
+        .enumerate()
+        .map(|(i, chunk)| {
             let dir = match chunk[0] {
                 0 => Dir::Tx,
                 1 => Dir::Rx,
                 other => return Err(anyhow!("Bad direction byte {other:#04x} in capture")),
             };
-            Ok(Packet {
-                dir,
-                data: chunk[1..].try_into().expect("chunk is one stride long"),
-            })
+            let data: [u8; HID_PACKET_SIZE] =
+                chunk[1..].try_into().expect("chunk is one stride long");
+            let size = data[PKT_SIZE_OFFSET];
+            if size as usize > MAX_PAYLOAD {
+                return Err(anyhow!(
+                    "Packet {i} in capture has SIZE byte {size}; the maximum is {MAX_PAYLOAD}                      (the capture is damaged — re-read the meter)"
+                ));
+            }
+            Ok(Packet { dir, data })
         })
         .collect()
 }
@@ -1758,6 +1773,32 @@ mod tests {
         let decoded = decode_packets(&encode_packets(&packets)).unwrap();
 
         assert_eq!(decoded, packets);
+    }
+
+    #[test]
+    fn assembler_rejects_an_oversized_size_byte() {
+        let mut pkt = packet(Dir::Rx, &[STX]).data;
+        pkt[PKT_SIZE_OFFSET] = 200;
+
+        let Some(Err(err)) = MessageAssembler::new().push(&pkt) else {
+            panic!("expected an error");
+        };
+
+        assert!(err.to_string().contains("200"), "got: {err}");
+    }
+
+    #[test]
+    fn decode_packets_rejects_an_oversized_size_byte() {
+        let mut packets = fixture_capture();
+        packets[2].data[PKT_SIZE_OFFSET] = 200;
+
+        let err = decode_packets(&encode_packets(&packets)).unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Packet 2") && msg.contains("200"),
+            "got: {msg}"
+        );
     }
 
     #[test]
