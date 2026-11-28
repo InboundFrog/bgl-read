@@ -189,6 +189,12 @@ R|<nrec>|^^^Glucose|<value>|<units>^<method>||<markers>||<timestamp>
 | Markers    | 6     | `A/M0/T1`      | See below                                                                             |
 | Timestamp  | 8     | `202411031245` | 12 digits `YYYYMMDDHHmm` or 14 digits `YYYYMMDDHHmmss`, device local time             |
 
+Any other digit count, a field whose month, day, hour, minute or second is out
+of range, and a date that does not exist (`20200231…`, or February 29th in a
+non-leap year) are all passed through as the meter's own text rather than
+reshaped into a timestamp that looks valid. A seconds field of `60` is treated
+the same way: a meter sends plain wall clock, not leap seconds.
+
 #### Marker field
 
 The marker field (index 6) is a string split by slashes. The first character
