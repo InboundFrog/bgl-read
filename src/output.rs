@@ -1,5 +1,5 @@
 use crate::protocol::Session;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::ValueEnum;
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
@@ -30,7 +30,9 @@ pub fn write(session: &Session, format: Format, path: Option<&Path>) -> Result<(
             opts.write(true).create(true).truncate(true);
             #[cfg(unix)]
             std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
-            let f = opts.open(p)?;
+            let f = opts
+                .open(p)
+                .with_context(|| format!("writing {}", p.display()))?;
             write_to(session, format, BufWriter::new(f))
         }
         None => {
