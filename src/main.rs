@@ -10,6 +10,7 @@ use std::path::PathBuf;
 #[derive(Parser, Debug)]
 #[command(
     name = "bgl-read",
+    version,
     about = "Read blood glucose data from a Contour Next USB meter"
 )]
 struct Cli {
@@ -21,7 +22,7 @@ struct Cli {
     output: Option<PathBuf>,
 
     /// List connected Contour devices and exit
-    #[arg(short, long)]
+    #[arg(short, long, conflicts_with_all = ["format", "output"])]
     list: bool,
 
     /// Show a live progress line on stderr while reading
