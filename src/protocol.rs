@@ -19,6 +19,7 @@
 //! It is the sum of those bytes mod 256, in uppercase hex.
 
 use anyhow::{Result, anyhow};
+use chrono::{NaiveDateTime, Timelike};
 use hidapi::{HidApi, HidDevice};
 use serde::Serialize;
 use std::fmt;
@@ -662,28 +663,32 @@ fn parse_meal_marker(annotation: &str) -> Option<String> {
 
 /// Parse a 12-digit (YYYYMMDDHHmm) or 14-digit (YYYYMMDDHHmmss) timestamp
 /// into an ISO 8601 local-time string.
+///
+/// Anything chrono will not accept is returned as the meter's own text rather
+/// than reshaped into a timestamp that looks valid. That covers an impossible
+/// date as well as an out-of-range field, so `20200231090000` stays raw: a
+/// meter reporting February 31st has a broken clock, and inventing a date for
+/// it would hide that. Any digit count other than 12 or 14 is left alone too.
+///
+/// The year is deliberately not bounded. A meter whose clock has been reset
+/// legitimately reports 2000, and chrono accepts the whole proleptic calendar.
 fn parse_timestamp(s: &str) -> String {
-    let digits: String = s.chars().filter(|c| c.is_ascii_digit()).take(14).collect();
-    match digits.len() {
-        14 => format!(
-            "{}-{}-{}T{}:{}:{}",
-            &digits[0..4],
-            &digits[4..6],
-            &digits[6..8],
-            &digits[8..10],
-            &digits[10..12],
-            &digits[12..14]
-        ),
-        12 | 13 => format!(
-            "{}-{}-{}T{}:{}:00",
-            &digits[0..4],
-            &digits[4..6],
-            &digits[6..8],
-            &digits[8..10],
-            &digits[10..12]
-        ),
-        _ => s.to_string(),
-    }
+    let digits: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
+    let parsed = match digits.len() {
+        14 => NaiveDateTime::parse_from_str(&digits, "%Y%m%d%H%M%S"),
+        // Seconds default to zero, which is what the 12-digit form means.
+        12 => NaiveDateTime::parse_from_str(&digits, "%Y%m%d%H%M"),
+        _ => return s.to_string(),
+    };
+    parsed
+        .ok()
+        // chrono reads a seconds field of 60 as a leap second, formats it as
+        // ":60", and reports second() as 59 with the overflow in the nanos. A
+        // meter sends plain wall clock, so 60 is corruption, and ":60" breaks
+        // most ISO 8601 consumers.
+        .filter(|dt| dt.nanosecond() < 1_000_000_000)
+        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S").to_string())
+        .unwrap_or_else(|| s.to_string())
 }
 
 // ── Binary packet capture ─────────────────────────────────────────────────────
@@ -1299,6 +1304,72 @@ mod tests {
     fn timestamp_ignores_trailing_garbage() {
         // ETB or other trailing bytes sometimes get through. We take only the digits.
         assert_eq!(parse_timestamp("201505261150\r\x17"), "2015-05-26T11:50:00");
+    }
+
+    #[test]
+    fn timestamp_bad_month_is_raw() {
+        assert_eq!(parse_timestamp("20201301090000"), "20201301090000");
+        assert_eq!(parse_timestamp("20200001090000"), "20200001090000");
+    }
+
+    #[test]
+    fn timestamp_bad_day_is_raw() {
+        assert_eq!(parse_timestamp("20200132090000"), "20200132090000");
+        assert_eq!(parse_timestamp("20200100090000"), "20200100090000");
+    }
+
+    #[test]
+    fn timestamp_bad_hour_is_raw() {
+        assert_eq!(parse_timestamp("20200101240000"), "20200101240000");
+    }
+
+    #[test]
+    fn timestamp_bad_minute_is_raw() {
+        assert_eq!(parse_timestamp("20200101096000"), "20200101096000");
+    }
+
+    #[test]
+    fn timestamp_bad_second_is_raw() {
+        // 60 is a leap second to chrono, which would render as ":60".
+        assert_eq!(parse_timestamp("20200101090060"), "20200101090060");
+        assert_eq!(parse_timestamp("20200101090061"), "20200101090061");
+    }
+
+    #[test]
+    fn timestamp_13_digit_is_raw() {
+        assert_eq!(parse_timestamp("2020010109000"), "2020010109000");
+    }
+
+    #[test]
+    fn timestamp_over_long_is_raw() {
+        // Truncating to the first 14 digits would turn each of these into a
+        // timestamp that looks valid, which is the same silent reshaping a
+        // 13-digit field gets rejected for.
+        assert_eq!(parse_timestamp("202001010900000"), "202001010900000");
+        assert_eq!(parse_timestamp("9999123123595999"), "9999123123595999");
+    }
+
+    #[test]
+    fn timestamp_impossible_date_is_raw() {
+        // The fields are each in range, so only a calendar catches these.
+        assert_eq!(parse_timestamp("20200231090000"), "20200231090000");
+        assert_eq!(parse_timestamp("20200431000000"), "20200431000000");
+        assert_eq!(parse_timestamp("20230229090000"), "20230229090000");
+    }
+
+    #[test]
+    fn timestamp_leap_day_accepted() {
+        assert_eq!(parse_timestamp("20240229090000"), "2024-02-29T09:00:00");
+    }
+
+    #[test]
+    fn timestamp_upper_bounds_accepted() {
+        assert_eq!(parse_timestamp("20201231235959"), "2020-12-31T23:59:59");
+    }
+
+    #[test]
+    fn timestamp_lower_bounds_accepted() {
+        assert_eq!(parse_timestamp("20000101000000"), "2000-01-01T00:00:00");
     }
 
     // ── parse_serial ──────────────────────────────────────────────────────────
