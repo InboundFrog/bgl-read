@@ -21,7 +21,7 @@ struct Cli {
     output: Option<PathBuf>,
 
     /// List connected Contour devices and exit
-    #[arg(short, long)]
+    #[arg(short, long, conflicts_with_all = ["format", "output"])]
     list: bool,
 
     /// Show a live progress line on stderr while reading
