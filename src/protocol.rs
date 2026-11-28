@@ -768,7 +768,7 @@ pub fn decode_packets(bytes: &[u8]) -> Result<Vec<Packet>> {
             let size = data[PKT_SIZE_OFFSET];
             if size as usize > MAX_PAYLOAD {
                 return Err(anyhow!(
-                    "Packet {i} in capture has SIZE byte {size}; the maximum is {MAX_PAYLOAD}                      (the capture is damaged — re-read the meter)"
+                    "Packet {i} in capture has SIZE byte {size}; the maximum is {MAX_PAYLOAD} (the capture is damaged — re-read the meter)"
                 ));
             }
             Ok(Packet { dir, data })
@@ -1924,10 +1924,9 @@ mod tests {
 
         let err = decode_packets(&encode_packets(&packets)).unwrap_err();
 
-        let msg = err.to_string();
-        assert!(
-            msg.contains("Packet 2") && msg.contains("200"),
-            "got: {msg}"
+        assert_eq!(
+            err.to_string(),
+            "Packet 2 in capture has SIZE byte 200; the maximum is 60 (the capture is damaged — re-read the meter)"
         );
     }
 
