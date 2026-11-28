@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use output::Format;
 use std::io::{self, IsTerminal};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -112,8 +112,21 @@ fn main() -> Result<()> {
                     _ => Format::Bytes,
                 };
                 // Do not let a dump failure hide the session error below.
-                if let Err(dump_err) = output::write(&partial, dump, cli.output.as_deref()) {
-                    eprintln!("warning: could not write the packet dump: {dump_err}");
+                // A dump in a different format must not overwrite the file the
+                // user asked for, so it goes beside it.
+                let dump_path = match (&cli.format, cli.output.as_deref()) {
+                    (Format::Binary, path) => path.map(Path::to_path_buf),
+                    (_, path) => path.map(dump_path),
+                };
+                match output::write(&partial, dump, dump_path.as_deref()) {
+                    Ok(()) => {
+                        if let Some(p) = &dump_path {
+                            eprintln!("Packet dump written to {}", p.display());
+                        }
+                    }
+                    Err(dump_err) => {
+                        eprintln!("warning: could not write the packet dump: {dump_err}");
+                    }
                 }
             }
             return Err(e.error);
@@ -121,4 +134,40 @@ fn main() -> Result<()> {
     };
 
     output::write(&session, cli.format, cli.output.as_deref())
+}
+
+/// `readings.csv` -> `readings.csv.dump`: append, never replace the extension.
+fn dump_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".dump");
+    name.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dump_path_appends_to_the_extension() {
+        assert_eq!(
+            dump_path(Path::new("readings.csv")),
+            PathBuf::from("readings.csv.dump")
+        );
+    }
+
+    #[test]
+    fn dump_path_without_an_extension() {
+        assert_eq!(
+            dump_path(Path::new("readings")),
+            PathBuf::from("readings.dump")
+        );
+    }
+
+    #[test]
+    fn dump_path_keeps_the_directory() {
+        assert_eq!(
+            dump_path(Path::new("out/dir/readings.csv")),
+            PathBuf::from("out/dir/readings.csv.dump")
+        );
+    }
 }
