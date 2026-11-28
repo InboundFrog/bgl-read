@@ -72,10 +72,10 @@ const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_MESSAGE_SIZE: usize = 64 * 1024;
 /// Default low and high glucose thresholds in mg/dL. We use them when the
 /// header config field is missing or cannot be parsed.
-const DEFAULT_LOW_THRESHOLD: u32 = 20;
-const DEFAULT_HIGH_THRESHOLD: u32 = 600;
-/// mmol/L → mg/dL conversion factor for glucose.
-const MMOL_TO_MGDL: f64 = 18.01559;
+const DEFAULT_LOW_THRESHOLD: f64 = 20.0;
+const DEFAULT_HIGH_THRESHOLD: f64 = 600.0;
+/// Units of the default thresholds.
+const DEFAULT_THRESHOLD_UNITS: &str = "mg/dL";
 
 // ── Public data types ─────────────────────────────────────────────────────────
 
@@ -86,10 +86,12 @@ pub struct DeviceInfo {
     pub record_count: u32,
     /// The meter's own clock at the time of the session. ISO 8601 local time, no time zone.
     pub device_time: String,
-    /// Low limit in mg/dL. Values from mmol/L meters are converted.
-    pub low_threshold: u32,
-    /// High limit in mg/dL. Values from mmol/L meters are converted.
-    pub high_threshold: u32,
+    /// Low limit of the meter's measurable range, in `threshold_units`.
+    pub low_threshold: f64,
+    /// High limit of the meter's measurable range, in `threshold_units`.
+    pub high_threshold: f64,
+    /// Units of `low_threshold` and `high_threshold`: "mg/dL" or "mmol/L", as the meter reports.
+    pub threshold_units: String,
 }
 
 impl Default for DeviceInfo {
@@ -101,6 +103,7 @@ impl Default for DeviceInfo {
             device_time: String::new(),
             low_threshold: DEFAULT_LOW_THRESHOLD,
             high_threshold: DEFAULT_HIGH_THRESHOLD,
+            threshold_units: DEFAULT_THRESHOLD_UNITS.into(),
         }
     }
 }
@@ -507,7 +510,7 @@ fn parse_header(frame: &str) -> Result<DeviceInfo> {
     let ts_raw = fields[13].trim();
     let device_time = parse_timestamp(ts_raw);
 
-    let (low_threshold, high_threshold) = parse_thresholds(fields[5]);
+    let (low_threshold, high_threshold, threshold_units) = parse_thresholds(fields[5]);
 
     Ok(DeviceInfo {
         model,
@@ -516,6 +519,7 @@ fn parse_header(frame: &str) -> Result<DeviceInfo> {
         device_time,
         low_threshold,
         high_threshold,
+        threshold_units,
     })
 }
 
@@ -531,36 +535,39 @@ fn parse_serial(raw: &str) -> String {
     }
 }
 
-/// Read the thresholds and units from the config field (field[5]).
+/// Read the thresholds and their units from the config field (field[5]).
+/// The values stay in the meter's own units. If V= is missing or unreadable we
+/// fall back to the meter's published range in whichever units U= gives, so one
+/// document never mixes two scales.
 /// The config looks like this:  A=1^C=00^I=0200^R=0^S=01^U=0^V=20600^X=...
-fn parse_thresholds(config: &str) -> (u32, u32) {
-    let mut low = DEFAULT_LOW_THRESHOLD;
-    let mut high = DEFAULT_HIGH_THRESHOLD;
+fn parse_thresholds(config: &str) -> (f64, f64, String) {
+    let mut low = None;
+    let mut high = None;
     let mut mmol = false;
 
     for part in config.split('^') {
         if let Some(val) = part.strip_prefix("V=") {
             // V=LLHHH: LL is the 2-digit low limit, HHH is the 3-digit high limit.
-            low = val
-                .get(..2)
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(DEFAULT_LOW_THRESHOLD);
-            high = val
-                .get(2..5)
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(DEFAULT_HIGH_THRESHOLD);
+            low = val.get(..2).and_then(|s| s.parse::<u32>().ok());
+            high = val.get(2..5).and_then(|s| s.parse::<u32>().ok());
         } else if let Some(val) = part.strip_prefix("U=") {
             mmol = val.trim() == "1";
         }
     }
 
-    if mmol {
-        // The values are mmol/L × 10. Convert them to mg/dL.
-        low = ((low as f64 / 10.0) * MMOL_TO_MGDL).round() as u32;
-        high = ((high as f64 / 10.0) * MMOL_TO_MGDL).round() as u32;
+    match (low, high) {
+        // mmol/L meters send tenths; mg/dL meters send whole numbers.
+        (Some(l), Some(h)) if mmol => (l as f64 / 10.0, h as f64 / 10.0, "mmol/L".into()),
+        (Some(l), Some(h)) => (l as f64, h as f64, "mg/dL".into()),
+        // V= was missing or unreadable, but U= still tells us the scale. The
+        // Contour range in mmol/L is 0.6-33.3 (docs/devices/contour-next.md).
+        _ if mmol => (0.6, 33.3, "mmol/L".into()),
+        _ => (
+            DEFAULT_LOW_THRESHOLD,
+            DEFAULT_HIGH_THRESHOLD,
+            DEFAULT_THRESHOLD_UNITS.into(),
+        ),
     }
-
-    (low, high)
 }
 
 /// R record example:
@@ -1280,27 +1287,55 @@ mod tests {
 
     #[test]
     fn thresholds_mg_dl() {
-        let (lo, hi) = parse_thresholds("A=1^U=0^V=20600");
-        assert_eq!(lo, 20);
-        assert_eq!(hi, 600);
+        let (lo, hi, units) = parse_thresholds("A=1^U=0^V=20600");
+        assert_eq!(lo, 20.0);
+        assert_eq!(hi, 600.0);
+        assert_eq!(units, "mg/dL");
     }
 
     #[test]
-    fn thresholds_mmol_converts_to_mg_dl() {
+    fn thresholds_mmol_stay_in_mmol() {
         // U=1 means mmol/L. V=02033 means low 0.2 mmol/L and high 3.3 mmol/L.
-        // After the factor 18.01559 these are about 4 and 59 mg/dL.
-        let (lo, hi) = parse_thresholds("U=1^V=02033");
-        assert_eq!(lo, 4);
-        assert_eq!(hi, 59);
+        // We keep them as the meter sends them.
+        let (lo, hi, units) = parse_thresholds("U=1^V=02033");
+        assert!((lo - 0.2).abs() < 1e-9);
+        assert!((hi - 3.3).abs() < 1e-9);
+        assert_eq!(units, "mmol/L");
+    }
+
+    #[test]
+    fn thresholds_missing_v_keeps_the_meters_scale() {
+        // U= alone still says which scale the meter uses, so the fallback must
+        // not switch a mmol/L meter to mg/dL numbers.
+        let (lo, hi, units) = parse_thresholds("U=1");
+        assert!((lo - 0.6).abs() < 1e-9);
+        assert!((hi - 33.3).abs() < 1e-9);
+        assert_eq!(units, "mmol/L");
+
+        let (lo, hi, units) = parse_thresholds("U=0");
+        assert_eq!(lo, 20.0);
+        assert_eq!(hi, 600.0);
+        assert_eq!(units, "mg/dL");
+    }
+
+    #[test]
+    fn thresholds_half_readable_v_falls_back_whole() {
+        // Only LL parses. Pairing a real low with a defaulted high would be
+        // worse than falling back to both, so the whole pair goes.
+        let (lo, hi, units) = parse_thresholds("U=0^V=99abc");
+        assert_eq!(lo, 20.0);
+        assert_eq!(hi, 600.0);
+        assert_eq!(units, "mg/dL");
     }
 
     #[test]
     fn thresholds_multibyte_utf8_does_not_panic() {
         // A multibyte character in the V field used to cause a panic.
         // The code sliced the string in the middle of a character.
-        let (lo, hi) = parse_thresholds("A=1^U=0^V=aé34");
-        assert_eq!(lo, 20);
-        assert_eq!(hi, 600);
+        let (lo, hi, units) = parse_thresholds("A=1^U=0^V=aé34");
+        assert_eq!(lo, 20.0);
+        assert_eq!(hi, 600.0);
+        assert_eq!(units, "mg/dL");
     }
 
     // ── parse_meal_marker ─────────────────────────────────────────────────────
@@ -1470,8 +1505,9 @@ mod tests {
         assert_eq!(info.serial_number, "1611135");
         assert_eq!(info.record_count, 4);
         assert_eq!(info.device_time, "2015-05-29T12:48:00");
-        assert_eq!(info.low_threshold, 20);
-        assert_eq!(info.high_threshold, 600);
+        assert_eq!(info.low_threshold, 20.0);
+        assert_eq!(info.high_threshold, 600.0);
+        assert_eq!(info.threshold_units, "mg/dL");
     }
 
     #[test]
@@ -1516,13 +1552,14 @@ mod tests {
 
     /// Real device config string: U=1 (mmol/L), V=06333.
     /// In the V field, low = "06" / 10 = 0.6 mmol/L and high = "333" / 10 = 33.3 mmol/L.
-    /// In mg/dL: 0.6 × 18.01559 ≈ 11 and 33.3 × 18.01559 ≈ 600.
+    /// The thresholds stay in mmol/L, the units of the meter.
     #[test]
     fn thresholds_real_device_config() {
         let config = "A=1^C=6^R=0^S=1^U=1^V=06333^X=039039100072^a=1^J=0";
-        let (lo, hi) = parse_thresholds(config);
-        assert_eq!(lo, 11);
-        assert_eq!(hi, 600);
+        let (lo, hi, units) = parse_thresholds(config);
+        assert!((lo - 0.6).abs() < 1e-9);
+        assert!((hi - 33.3).abs() < 1e-9);
+        assert_eq!(units, "mmol/L");
     }
 
     /// The most common annotation in the real data. It has no meal or time context.
@@ -1558,9 +1595,10 @@ mod tests {
         assert_eq!(info.serial_number, "0000000");
         assert_eq!(info.record_count, 800);
         assert_eq!(info.device_time, "2020-01-01T09:00:00");
-        // U=1, V=06333 gives low ≈ 11 mg/dL and high ≈ 600 mg/dL.
-        assert_eq!(info.low_threshold, 11);
-        assert_eq!(info.high_threshold, 600);
+        // U=1, V=06333 gives low 0.6 mmol/L and high 33.3 mmol/L.
+        assert!((info.low_threshold - 0.6).abs() < 1e-9);
+        assert!((info.high_threshold - 33.3).abs() < 1e-9);
+        assert_eq!(info.threshold_units, "mmol/L");
     }
 
     // ── parse_records_from_text / fixture round-trip ──────────────────────────
@@ -1580,6 +1618,10 @@ mod tests {
         assert_eq!(device.serial_number, "0000000");
         assert_eq!(device.record_count, 6);
         assert_eq!(device.device_time, "2020-01-01T09:00:00");
+        // The fixture is a mmol/L meter: V=06333.
+        assert!((device.low_threshold - 0.6).abs() < 1e-9);
+        assert!((device.high_threshold - 33.3).abs() < 1e-9);
+        assert_eq!(device.threshold_units, "mmol/L");
     }
 
     #[test]
