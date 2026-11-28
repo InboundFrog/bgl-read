@@ -90,8 +90,7 @@ fn main() -> Result<()> {
 
     let api = hidapi::HidApi::new()?;
     let device = protocol::open_device(&api)?;
-    let capture = matches!(cli.format, Format::Bytes | Format::Binary);
-    let session = match protocol::fetch_all(&device, cli.progress, capture) {
+    let session = match protocol::fetch_all(&device, cli.progress) {
         Ok(session) => session,
         Err(e) => {
             // A failed session is exactly when a packet dump is most useful —
