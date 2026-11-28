@@ -10,6 +10,7 @@ use std::path::PathBuf;
 #[derive(Parser, Debug)]
 #[command(
     name = "bgl-read",
+    version,
     about = "Read blood glucose data from a Contour Next USB meter"
 )]
 struct Cli {
