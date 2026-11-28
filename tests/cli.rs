@@ -233,11 +233,24 @@ fn missing_input_file_fails() {
         let o = run(&[flag, "tests/fixtures/does-not-exist"]);
         assert_eq!(o.status.code(), Some(1), "{flag}");
         assert!(
-            stderr(&o).contains("No such file or directory"),
+            stderr(&o).contains("reading tests/fixtures/does-not-exist"),
             "{flag}: {}",
             stderr(&o)
         );
+        assert!(stderr(&o).contains("No such file or directory"), "{flag}");
     }
+}
+
+#[test]
+fn unwritable_output_names_the_path() {
+    let out = temp("no-such-dir").join("x.csv");
+    let o = run(&["--from-records", FIXTURE, "--output", s(&out)]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        stderr(&o).contains(&format!("writing {}", out.display())),
+        "{}",
+        stderr(&o)
+    );
 }
 
 // ── Flag handling ─────────────────────────────────────────────────────────────
