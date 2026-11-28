@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use output::Format;
 use std::io::{self, IsTerminal};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -107,13 +107,26 @@ fn main() -> Result<()> {
                 };
                 // Dump in whichever capture format was asked for, so a
                 // `--format binary` failure still leaves a replayable file.
-                let dump = match cli.format {
-                    Format::Binary => Format::Binary,
-                    _ => Format::Bytes,
+                // A capture format dumps as itself, into the file that was
+                // named for it. Any other format would get a hex dump written
+                // over data it does not match, so that one goes beside the
+                // file rather than over it.
+                let (dump, target) = match cli.format {
+                    Format::Bytes | Format::Binary => (cli.format, cli.output.clone()),
+                    _ => (Format::Bytes, cli.output.as_deref().map(dump_path)),
                 };
                 // Do not let a dump failure hide the session error below.
-                if let Err(dump_err) = output::write(&partial, dump, cli.output.as_deref()) {
-                    eprintln!("warning: could not write the packet dump: {dump_err}");
+                match output::write(&partial, dump, target.as_deref()) {
+                    // The dump can land at a path the user never typed, so
+                    // say where it went.
+                    Ok(()) => {
+                        if let Some(p) = &target {
+                            eprintln!("Packet dump written to {}", p.display());
+                        }
+                    }
+                    Err(dump_err) => {
+                        eprintln!("warning: could not write the packet dump: {dump_err}");
+                    }
                 }
             }
             return Err(e.error);
@@ -121,4 +134,41 @@ fn main() -> Result<()> {
     };
 
     output::write(&session, cli.format, cli.output.as_deref())
+}
+
+/// `readings.csv` -> `readings.csv.dump`: append, never replace the extension,
+/// so the name the dump came from stays readable and two `--output` paths
+/// cannot collide on one dump. An earlier dump at that path is replaced.
+fn dump_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".dump");
+    name.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dump_path_appends_rather_than_replacing_the_extension() {
+        assert_eq!(
+            dump_path(Path::new("out/readings.csv")),
+            PathBuf::from("out/readings.csv.dump")
+        );
+    }
+
+    /// Why `OsString` and not `format!("{}.dump", path.display())`: `display()`
+    /// replaces bytes that are not UTF-8, which would write the dump to a
+    /// different file than the one the user named.
+    #[cfg(unix)]
+    #[test]
+    fn dump_path_keeps_non_utf8_bytes() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let raw = OsStr::from_bytes(b"read\xffings.csv");
+        assert_eq!(
+            dump_path(Path::new(raw)).as_os_str().as_bytes(),
+            b"read\xffings.csv.dump"
+        );
+    }
 }
