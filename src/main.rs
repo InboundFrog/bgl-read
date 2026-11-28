@@ -104,16 +104,7 @@ fn main() -> Result<()> {
                     raw_packets: e.packets,
                     ..Default::default()
                 };
-                // Dump in whichever capture format was asked for, so a
-                // `--format binary` failure still leaves a replayable file.
-                // A capture format dumps as itself, into the file that was
-                // named for it. Any other format would get a hex dump written
-                // over data it does not match, so that one goes beside the
-                // file rather than over it.
-                let (dump, target) = match cli.format {
-                    Format::Bytes | Format::Binary => (cli.format, cli.output.clone()),
-                    _ => (Format::Bytes, cli.output.as_deref().map(dump_path)),
-                };
+                let (dump, target) = dump_target(cli.format, cli.output.as_deref());
                 // Do not let a dump failure hide the session error below.
                 match output::write(&partial, dump, target.as_deref()) {
                     // The dump can land at a path the user never typed, so
@@ -135,6 +126,19 @@ fn main() -> Result<()> {
     output::write(&session, cli.format, cli.output.as_deref())
 }
 
+/// Where a failed read's packet dump goes, and in which format.
+///
+/// A capture format dumps as itself, into the file that was named for it, so
+/// a `--format binary` failure still leaves a replayable file. Any other
+/// format would get a hex dump written into a file named for something else —
+/// and `output::write` truncates — so that dump goes beside the file instead.
+fn dump_target(format: Format, output: Option<&Path>) -> (Format, Option<PathBuf>) {
+    match format {
+        Format::Bytes | Format::Binary => (format, output.map(Path::to_path_buf)),
+        _ => (Format::Bytes, output.map(dump_path)),
+    }
+}
+
 /// `readings.csv` -> `readings.csv.dump`: append, never replace the extension,
 /// so the name the dump came from stays readable and two `--output` paths
 /// cannot collide on one dump. An earlier dump at that path is replaced.
@@ -147,6 +151,43 @@ fn dump_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The data-loss guard: a hex dump must never land on the file the user
+    /// named for another format, because `output::write` truncates it.
+    #[test]
+    fn a_hex_dump_never_lands_on_the_output_file() {
+        for format in [Format::Json, Format::Csv, Format::Records] {
+            let (dump, target) = dump_target(format, Some(Path::new("readings.csv")));
+            assert!(matches!(dump, Format::Bytes));
+            assert_eq!(target, Some(PathBuf::from("readings.csv.dump")));
+        }
+    }
+
+    #[test]
+    fn a_capture_format_dumps_into_the_file_named_for_it() {
+        let (dump, target) = dump_target(Format::Bytes, Some(Path::new("session.hex")));
+        assert!(matches!(dump, Format::Bytes));
+        assert_eq!(target, Some(PathBuf::from("session.hex")));
+
+        let (dump, target) = dump_target(Format::Binary, Some(Path::new("capture.bin")));
+        assert!(matches!(dump, Format::Binary));
+        assert_eq!(target, Some(PathBuf::from("capture.bin")));
+    }
+
+    /// No `--output` means the dump goes to stdout, and that there is no path
+    /// for the caller to print.
+    #[test]
+    fn without_an_output_file_every_format_dumps_to_stdout() {
+        for format in [
+            Format::Json,
+            Format::Csv,
+            Format::Records,
+            Format::Bytes,
+            Format::Binary,
+        ] {
+            assert_eq!(dump_target(format, None).1, None);
+        }
+    }
 
     #[test]
     fn dump_path_appends_rather_than_replacing_the_extension() {
