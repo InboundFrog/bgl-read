@@ -1,7 +1,7 @@
 mod output;
 mod protocol;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use output::Format;
 use std::io::{self, IsTerminal};
@@ -55,7 +55,9 @@ fn main() -> Result<()> {
     }
 
     if let Some(path) = cli.from_bytes.as_deref() {
-        let packets = protocol::decode_packets(&std::fs::read(path)?)?;
+        let packets = protocol::decode_packets(
+            &std::fs::read(path).with_context(|| format!("reading {}", path.display()))?,
+        )?;
         // A packet dump needs no session. Skipping the rebuild lets a person
         // dump an incomplete capture, which is when a dump helps most.
         let session = if matches!(cli.format, Format::Bytes | Format::Binary) {
@@ -70,7 +72,8 @@ fn main() -> Result<()> {
     }
 
     if let Some(path) = cli.from_records.as_deref() {
-        let text = std::fs::read_to_string(path)?;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let session = protocol::session_from_records_text(&text);
         if matches!(cli.format, Format::Bytes | Format::Binary) {
             eprintln!(
