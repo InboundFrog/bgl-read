@@ -304,10 +304,27 @@ fn hid_read(
     if n == 0 {
         return Err(anyhow!("Device read timeout (no data)"));
     }
+    // Log before validating so a short read still shows up in a capture. The
+    // bytes past `n` are zero padding, so the logged packet looks full and a
+    // replay sees zeros rather than the error; keeping the evidence wins.
     log.push(Packet {
         dir: Dir::Rx,
         data: pkt,
     });
+    if n < PKT_DATA_OFFSET {
+        return Err(anyhow!(
+            "Short HID read: got {n} bytes, too few to reach the SIZE byte at index {PKT_SIZE_OFFSET}"
+        ));
+    }
+    let size = pkt[PKT_SIZE_OFFSET] as usize;
+    // An oversized SIZE is corruption, not a short read: leave it for
+    // MessageAssembler::push, whose error says so.
+    if size <= MAX_PAYLOAD && n < PKT_DATA_OFFSET + size {
+        return Err(anyhow!(
+            "Short HID read: got {n} bytes but the packet declares {size} data bytes ({} needed)",
+            PKT_DATA_OFFSET + size
+        ));
+    }
     Ok(pkt)
 }
 
@@ -362,8 +379,17 @@ impl MessageAssembler {
     /// complete message, resetting for the next one.
     fn push(&mut self, pkt: &[u8; HID_PACKET_SIZE]) -> Option<Result<Message>> {
         let size = pkt[PKT_SIZE_OFFSET] as usize;
-        let data_end = (PKT_DATA_OFFSET + size).min(HID_PACKET_SIZE);
-        self.buf.extend_from_slice(&pkt[PKT_DATA_OFFSET..data_end]);
+        // A packet holds at most MAX_PAYLOAD data bytes, so a larger SIZE is
+        // corruption rather than a continuation. Treating it as one is what
+        // used to turn a damaged packet into a short reading list.
+        if size > MAX_PAYLOAD {
+            self.buf.clear();
+            return Some(Err(anyhow!(
+                "Corrupt HID packet: SIZE byte {size} exceeds the {MAX_PAYLOAD}-byte maximum"
+            )));
+        }
+        self.buf
+            .extend_from_slice(&pkt[PKT_DATA_OFFSET..PKT_DATA_OFFSET + size]);
 
         if self.buf.len() > MAX_MESSAGE_SIZE {
             self.buf.clear();
@@ -718,16 +744,22 @@ pub fn decode_packets(bytes: &[u8]) -> Result<Vec<Packet>> {
     }
 
     body.chunks_exact(stride)
-        .map(|chunk| {
+        .enumerate()
+        .map(|(i, chunk)| {
             let dir = match chunk[0] {
                 0 => Dir::Tx,
                 1 => Dir::Rx,
                 other => return Err(anyhow!("Bad direction byte {other:#04x} in capture")),
             };
-            Ok(Packet {
-                dir,
-                data: chunk[1..].try_into().expect("chunk is one stride long"),
-            })
+            let data: [u8; HID_PACKET_SIZE] =
+                chunk[1..].try_into().expect("chunk is one stride long");
+            let size = data[PKT_SIZE_OFFSET];
+            if size as usize > MAX_PAYLOAD {
+                return Err(anyhow!(
+                    "Packet {i} in capture has SIZE byte {size}; the maximum is {MAX_PAYLOAD}                      (the capture is damaged — re-read the meter)"
+                ));
+            }
+            Ok(Packet { dir, data })
         })
         .collect()
 }
@@ -1761,6 +1793,32 @@ mod tests {
     }
 
     #[test]
+    fn assembler_rejects_an_oversized_size_byte() {
+        let mut pkt = packet(Dir::Rx, &[STX]).data;
+        pkt[PKT_SIZE_OFFSET] = 200;
+
+        let Some(Err(err)) = MessageAssembler::new().push(&pkt) else {
+            panic!("expected an error");
+        };
+
+        assert!(err.to_string().contains("200"), "got: {err}");
+    }
+
+    #[test]
+    fn decode_packets_rejects_an_oversized_size_byte() {
+        let mut packets = fixture_capture();
+        packets[2].data[PKT_SIZE_OFFSET] = 200;
+
+        let err = decode_packets(&encode_packets(&packets)).unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Packet 2") && msg.contains("200"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
     fn decode_packets_rejects_foreign_and_damaged_files() {
         let good = encode_packets(&fixture_capture());
 
@@ -2032,6 +2090,84 @@ mod tests {
         }
         script.extend(script_of(vec![packet(Dir::Rx, &[EOT])]));
         script
+    }
+
+    /// A fake meter whose single read copies only `n` bytes of `pkt`.
+    struct ShortMeter {
+        pkt: [u8; HID_PACKET_SIZE],
+        n: usize,
+    }
+
+    impl Transport for ShortMeter {
+        fn write(&self, _data: &[u8]) -> Result<()> {
+            Ok(())
+        }
+
+        fn read_timeout(&self, buf: &mut [u8], _timeout_ms: i32) -> Result<usize> {
+            buf[..self.n].copy_from_slice(&self.pkt[..self.n]);
+            Ok(self.n)
+        }
+    }
+
+    /// Read one packet through `hid_read`, capturing, and return the result
+    /// with the capture log.
+    fn read_once(pkt: [u8; HID_PACKET_SIZE], n: usize) -> (Result<[u8; HID_PACKET_SIZE]>, usize) {
+        let mut log = PacketLog::new(true);
+        let deadline = Instant::now() + std::time::Duration::from_secs(1);
+        let res = hid_read(&ShortMeter { pkt, n }, deadline, &mut log);
+        (res, log.packets.len())
+    }
+
+    #[test]
+    fn hid_read_rejects_a_read_shorter_than_the_declared_size() {
+        let pkt = packet(Dir::Rx, b"hello world").data;
+        let (res, logged) = read_once(pkt, PKT_DATA_OFFSET + 5);
+
+        let msg = res.unwrap_err().to_string();
+        assert!(
+            msg.contains("got 9 bytes") && msg.contains("declares 11"),
+            "got: {msg}"
+        );
+        assert_eq!(logged, 1, "the short packet must still be logged");
+    }
+
+    #[test]
+    fn hid_read_rejects_a_read_that_stops_before_the_size_byte() {
+        let pkt = packet(Dir::Rx, &[ENQ]).data;
+        let (res, logged) = read_once(pkt, PKT_DATA_OFFSET - 1);
+
+        let msg = res.unwrap_err().to_string();
+        assert!(msg.contains("got 3 bytes"), "got: {msg}");
+        assert_eq!(logged, 1);
+    }
+
+    #[test]
+    fn hid_read_leaves_an_oversized_size_byte_to_the_assembler() {
+        let mut pkt = packet(Dir::Rx, &[STX]).data;
+        pkt[PKT_SIZE_OFFSET] = 200;
+        let (res, _) = read_once(pkt, HID_PACKET_SIZE);
+        let pkt = res.expect("a full-length read is not a short read");
+
+        let Some(Err(err)) = MessageAssembler::new().push(&pkt) else {
+            panic!("expected an error");
+        };
+        assert!(err.to_string().contains("Corrupt HID packet"), "got: {err}");
+    }
+
+    #[test]
+    fn hid_read_accepts_a_full_length_read() {
+        let pkt = packet(Dir::Rx, b"hello world").data;
+        let (res, _) = read_once(pkt, HID_PACKET_SIZE);
+
+        assert_eq!(res.unwrap(), pkt);
+    }
+
+    #[test]
+    fn hid_read_accepts_a_read_that_just_covers_the_declared_size() {
+        let pkt = packet(Dir::Rx, b"hello world").data;
+        let (res, _) = read_once(pkt, PKT_DATA_OFFSET + 11);
+
+        assert_eq!(res.unwrap(), pkt);
     }
 
     #[test]
