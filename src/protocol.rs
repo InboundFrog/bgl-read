@@ -73,10 +73,10 @@ const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_MESSAGE_SIZE: usize = 64 * 1024;
 /// Default low and high glucose thresholds in mg/dL. We use them when the
 /// header config field is missing or cannot be parsed.
-const DEFAULT_LOW_THRESHOLD: u32 = 20;
-const DEFAULT_HIGH_THRESHOLD: u32 = 600;
-/// mmol/L → mg/dL conversion factor for glucose.
-const MMOL_TO_MGDL: f64 = 18.01559;
+const DEFAULT_LOW_THRESHOLD: f64 = 20.0;
+const DEFAULT_HIGH_THRESHOLD: f64 = 600.0;
+/// Units of the default thresholds.
+const DEFAULT_THRESHOLD_UNITS: &str = "mg/dL";
 
 // ── Public data types ─────────────────────────────────────────────────────────
 
@@ -87,10 +87,12 @@ pub struct DeviceInfo {
     pub record_count: u32,
     /// The meter's own clock at the time of the session. ISO 8601 local time, no time zone.
     pub device_time: String,
-    /// Low limit in mg/dL. Values from mmol/L meters are converted.
-    pub low_threshold: u32,
-    /// High limit in mg/dL. Values from mmol/L meters are converted.
-    pub high_threshold: u32,
+    /// Low limit of the meter's measurable range, in `threshold_units`.
+    pub low_threshold: f64,
+    /// High limit of the meter's measurable range, in `threshold_units`.
+    pub high_threshold: f64,
+    /// Units of `low_threshold` and `high_threshold`: "mg/dL" or "mmol/L", as the meter reports.
+    pub threshold_units: String,
 }
 
 impl Default for DeviceInfo {
@@ -102,6 +104,7 @@ impl Default for DeviceInfo {
             device_time: String::new(),
             low_threshold: DEFAULT_LOW_THRESHOLD,
             high_threshold: DEFAULT_HIGH_THRESHOLD,
+            threshold_units: DEFAULT_THRESHOLD_UNITS.into(),
         }
     }
 }
@@ -305,10 +308,27 @@ fn hid_read(
     if n == 0 {
         return Err(anyhow!("Device read timeout (no data)"));
     }
+    // Log before validating so a short read still shows up in a capture. The
+    // bytes past `n` are zero padding, so the logged packet looks full and a
+    // replay sees zeros rather than the error; keeping the evidence wins.
     log.push(Packet {
         dir: Dir::Rx,
         data: pkt,
     });
+    if n < PKT_DATA_OFFSET {
+        return Err(anyhow!(
+            "Short HID read: got {n} bytes, too few to reach the SIZE byte at index {PKT_SIZE_OFFSET}"
+        ));
+    }
+    let size = pkt[PKT_SIZE_OFFSET] as usize;
+    // An oversized SIZE is corruption, not a short read: leave it for
+    // MessageAssembler::push, whose error says so.
+    if size <= MAX_PAYLOAD && n < PKT_DATA_OFFSET + size {
+        return Err(anyhow!(
+            "Short HID read: got {n} bytes but the packet declares {size} data bytes ({} needed)",
+            PKT_DATA_OFFSET + size
+        ));
+    }
     Ok(pkt)
 }
 
@@ -363,8 +383,17 @@ impl MessageAssembler {
     /// complete message, resetting for the next one.
     fn push(&mut self, pkt: &[u8; HID_PACKET_SIZE]) -> Option<Result<Message>> {
         let size = pkt[PKT_SIZE_OFFSET] as usize;
-        let data_end = (PKT_DATA_OFFSET + size).min(HID_PACKET_SIZE);
-        self.buf.extend_from_slice(&pkt[PKT_DATA_OFFSET..data_end]);
+        // A packet holds at most MAX_PAYLOAD data bytes, so a larger SIZE is
+        // corruption rather than a continuation. Treating it as one is what
+        // used to turn a damaged packet into a short reading list.
+        if size > MAX_PAYLOAD {
+            self.buf.clear();
+            return Some(Err(anyhow!(
+                "Corrupt HID packet: SIZE byte {size} exceeds the {MAX_PAYLOAD}-byte maximum"
+            )));
+        }
+        self.buf
+            .extend_from_slice(&pkt[PKT_DATA_OFFSET..PKT_DATA_OFFSET + size]);
 
         if self.buf.len() > MAX_MESSAGE_SIZE {
             self.buf.clear();
@@ -508,7 +537,7 @@ fn parse_header(frame: &str) -> Result<DeviceInfo> {
     let ts_raw = fields[13].trim();
     let device_time = parse_timestamp(ts_raw);
 
-    let (low_threshold, high_threshold) = parse_thresholds(fields[5]);
+    let (low_threshold, high_threshold, threshold_units) = parse_thresholds(fields[5]);
 
     Ok(DeviceInfo {
         model,
@@ -517,6 +546,7 @@ fn parse_header(frame: &str) -> Result<DeviceInfo> {
         device_time,
         low_threshold,
         high_threshold,
+        threshold_units,
     })
 }
 
@@ -532,36 +562,39 @@ fn parse_serial(raw: &str) -> String {
     }
 }
 
-/// Read the thresholds and units from the config field (field[5]).
+/// Read the thresholds and their units from the config field (field[5]).
+/// The values stay in the meter's own units. If V= is missing or unreadable we
+/// fall back to the meter's published range in whichever units U= gives, so one
+/// document never mixes two scales.
 /// The config looks like this:  A=1^C=00^I=0200^R=0^S=01^U=0^V=20600^X=...
-fn parse_thresholds(config: &str) -> (u32, u32) {
-    let mut low = DEFAULT_LOW_THRESHOLD;
-    let mut high = DEFAULT_HIGH_THRESHOLD;
+fn parse_thresholds(config: &str) -> (f64, f64, String) {
+    let mut low = None;
+    let mut high = None;
     let mut mmol = false;
 
     for part in config.split('^') {
         if let Some(val) = part.strip_prefix("V=") {
             // V=LLHHH: LL is the 2-digit low limit, HHH is the 3-digit high limit.
-            low = val
-                .get(..2)
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(DEFAULT_LOW_THRESHOLD);
-            high = val
-                .get(2..5)
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(DEFAULT_HIGH_THRESHOLD);
+            low = val.get(..2).and_then(|s| s.parse::<u32>().ok());
+            high = val.get(2..5).and_then(|s| s.parse::<u32>().ok());
         } else if let Some(val) = part.strip_prefix("U=") {
             mmol = val.trim() == "1";
         }
     }
 
-    if mmol {
-        // The values are mmol/L × 10. Convert them to mg/dL.
-        low = ((low as f64 / 10.0) * MMOL_TO_MGDL).round() as u32;
-        high = ((high as f64 / 10.0) * MMOL_TO_MGDL).round() as u32;
+    match (low, high) {
+        // mmol/L meters send tenths; mg/dL meters send whole numbers.
+        (Some(l), Some(h)) if mmol => (l as f64 / 10.0, h as f64 / 10.0, "mmol/L".into()),
+        (Some(l), Some(h)) => (l as f64, h as f64, "mg/dL".into()),
+        // V= was missing or unreadable, but U= still tells us the scale. The
+        // Contour range in mmol/L is 0.6-33.3 (docs/devices/contour-next.md).
+        _ if mmol => (0.6, 33.3, "mmol/L".into()),
+        _ => (
+            DEFAULT_LOW_THRESHOLD,
+            DEFAULT_HIGH_THRESHOLD,
+            DEFAULT_THRESHOLD_UNITS.into(),
+        ),
     }
-
-    (low, high)
 }
 
 /// R record example:
@@ -723,16 +756,22 @@ pub fn decode_packets(bytes: &[u8]) -> Result<Vec<Packet>> {
     }
 
     body.chunks_exact(stride)
-        .map(|chunk| {
+        .enumerate()
+        .map(|(i, chunk)| {
             let dir = match chunk[0] {
                 0 => Dir::Tx,
                 1 => Dir::Rx,
                 other => return Err(anyhow!("Bad direction byte {other:#04x} in capture")),
             };
-            Ok(Packet {
-                dir,
-                data: chunk[1..].try_into().expect("chunk is one stride long"),
-            })
+            let data: [u8; HID_PACKET_SIZE] =
+                chunk[1..].try_into().expect("chunk is one stride long");
+            let size = data[PKT_SIZE_OFFSET];
+            if size as usize > MAX_PAYLOAD {
+                return Err(anyhow!(
+                    "Packet {i} in capture has SIZE byte {size}; the maximum is {MAX_PAYLOAD}                      (the capture is damaged — re-read the meter)"
+                ));
+            }
+            Ok(Packet { dir, data })
         })
         .collect()
 }
@@ -1351,27 +1390,55 @@ mod tests {
 
     #[test]
     fn thresholds_mg_dl() {
-        let (lo, hi) = parse_thresholds("A=1^U=0^V=20600");
-        assert_eq!(lo, 20);
-        assert_eq!(hi, 600);
+        let (lo, hi, units) = parse_thresholds("A=1^U=0^V=20600");
+        assert_eq!(lo, 20.0);
+        assert_eq!(hi, 600.0);
+        assert_eq!(units, "mg/dL");
     }
 
     #[test]
-    fn thresholds_mmol_converts_to_mg_dl() {
+    fn thresholds_mmol_stay_in_mmol() {
         // U=1 means mmol/L. V=02033 means low 0.2 mmol/L and high 3.3 mmol/L.
-        // After the factor 18.01559 these are about 4 and 59 mg/dL.
-        let (lo, hi) = parse_thresholds("U=1^V=02033");
-        assert_eq!(lo, 4);
-        assert_eq!(hi, 59);
+        // We keep them as the meter sends them.
+        let (lo, hi, units) = parse_thresholds("U=1^V=02033");
+        assert!((lo - 0.2).abs() < 1e-9);
+        assert!((hi - 3.3).abs() < 1e-9);
+        assert_eq!(units, "mmol/L");
+    }
+
+    #[test]
+    fn thresholds_missing_v_keeps_the_meters_scale() {
+        // U= alone still says which scale the meter uses, so the fallback must
+        // not switch a mmol/L meter to mg/dL numbers.
+        let (lo, hi, units) = parse_thresholds("U=1");
+        assert!((lo - 0.6).abs() < 1e-9);
+        assert!((hi - 33.3).abs() < 1e-9);
+        assert_eq!(units, "mmol/L");
+
+        let (lo, hi, units) = parse_thresholds("U=0");
+        assert_eq!(lo, 20.0);
+        assert_eq!(hi, 600.0);
+        assert_eq!(units, "mg/dL");
+    }
+
+    #[test]
+    fn thresholds_half_readable_v_falls_back_whole() {
+        // Only LL parses. Pairing a real low with a defaulted high would be
+        // worse than falling back to both, so the whole pair goes.
+        let (lo, hi, units) = parse_thresholds("U=0^V=99abc");
+        assert_eq!(lo, 20.0);
+        assert_eq!(hi, 600.0);
+        assert_eq!(units, "mg/dL");
     }
 
     #[test]
     fn thresholds_multibyte_utf8_does_not_panic() {
         // A multibyte character in the V field used to cause a panic.
         // The code sliced the string in the middle of a character.
-        let (lo, hi) = parse_thresholds("A=1^U=0^V=aé34");
-        assert_eq!(lo, 20);
-        assert_eq!(hi, 600);
+        let (lo, hi, units) = parse_thresholds("A=1^U=0^V=aé34");
+        assert_eq!(lo, 20.0);
+        assert_eq!(hi, 600.0);
+        assert_eq!(units, "mg/dL");
     }
 
     // ── parse_meal_marker ─────────────────────────────────────────────────────
@@ -1541,8 +1608,9 @@ mod tests {
         assert_eq!(info.serial_number, "1611135");
         assert_eq!(info.record_count, 4);
         assert_eq!(info.device_time, "2015-05-29T12:48:00");
-        assert_eq!(info.low_threshold, 20);
-        assert_eq!(info.high_threshold, 600);
+        assert_eq!(info.low_threshold, 20.0);
+        assert_eq!(info.high_threshold, 600.0);
+        assert_eq!(info.threshold_units, "mg/dL");
     }
 
     #[test]
@@ -1587,13 +1655,14 @@ mod tests {
 
     /// Real device config string: U=1 (mmol/L), V=06333.
     /// In the V field, low = "06" / 10 = 0.6 mmol/L and high = "333" / 10 = 33.3 mmol/L.
-    /// In mg/dL: 0.6 × 18.01559 ≈ 11 and 33.3 × 18.01559 ≈ 600.
+    /// The thresholds stay in mmol/L, the units of the meter.
     #[test]
     fn thresholds_real_device_config() {
         let config = "A=1^C=6^R=0^S=1^U=1^V=06333^X=039039100072^a=1^J=0";
-        let (lo, hi) = parse_thresholds(config);
-        assert_eq!(lo, 11);
-        assert_eq!(hi, 600);
+        let (lo, hi, units) = parse_thresholds(config);
+        assert!((lo - 0.6).abs() < 1e-9);
+        assert!((hi - 33.3).abs() < 1e-9);
+        assert_eq!(units, "mmol/L");
     }
 
     /// The most common annotation in the real data. It has no meal or time context.
@@ -1629,9 +1698,10 @@ mod tests {
         assert_eq!(info.serial_number, "0000000");
         assert_eq!(info.record_count, 800);
         assert_eq!(info.device_time, "2020-01-01T09:00:00");
-        // U=1, V=06333 gives low ≈ 11 mg/dL and high ≈ 600 mg/dL.
-        assert_eq!(info.low_threshold, 11);
-        assert_eq!(info.high_threshold, 600);
+        // U=1, V=06333 gives low 0.6 mmol/L and high 33.3 mmol/L.
+        assert!((info.low_threshold - 0.6).abs() < 1e-9);
+        assert!((info.high_threshold - 33.3).abs() < 1e-9);
+        assert_eq!(info.threshold_units, "mmol/L");
     }
 
     // ── parse_records_from_text / fixture round-trip ──────────────────────────
@@ -1651,6 +1721,10 @@ mod tests {
         assert_eq!(device.serial_number, "0000000");
         assert_eq!(device.record_count, 6);
         assert_eq!(device.device_time, "2020-01-01T09:00:00");
+        // The fixture is a mmol/L meter: V=06333.
+        assert!((device.low_threshold - 0.6).abs() < 1e-9);
+        assert!((device.high_threshold - 33.3).abs() < 1e-9);
+        assert_eq!(device.threshold_units, "mmol/L");
     }
 
     #[test]
@@ -1829,6 +1903,32 @@ mod tests {
         let decoded = decode_packets(&encode_packets(&packets)).unwrap();
 
         assert_eq!(decoded, packets);
+    }
+
+    #[test]
+    fn assembler_rejects_an_oversized_size_byte() {
+        let mut pkt = packet(Dir::Rx, &[STX]).data;
+        pkt[PKT_SIZE_OFFSET] = 200;
+
+        let Some(Err(err)) = MessageAssembler::new().push(&pkt) else {
+            panic!("expected an error");
+        };
+
+        assert!(err.to_string().contains("200"), "got: {err}");
+    }
+
+    #[test]
+    fn decode_packets_rejects_an_oversized_size_byte() {
+        let mut packets = fixture_capture();
+        packets[2].data[PKT_SIZE_OFFSET] = 200;
+
+        let err = decode_packets(&encode_packets(&packets)).unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Packet 2") && msg.contains("200"),
+            "got: {msg}"
+        );
     }
 
     #[test]
@@ -2103,6 +2203,84 @@ mod tests {
         }
         script.extend(script_of(vec![packet(Dir::Rx, &[EOT])]));
         script
+    }
+
+    /// A fake meter whose single read copies only `n` bytes of `pkt`.
+    struct ShortMeter {
+        pkt: [u8; HID_PACKET_SIZE],
+        n: usize,
+    }
+
+    impl Transport for ShortMeter {
+        fn write(&self, _data: &[u8]) -> Result<()> {
+            Ok(())
+        }
+
+        fn read_timeout(&self, buf: &mut [u8], _timeout_ms: i32) -> Result<usize> {
+            buf[..self.n].copy_from_slice(&self.pkt[..self.n]);
+            Ok(self.n)
+        }
+    }
+
+    /// Read one packet through `hid_read`, capturing, and return the result
+    /// with the capture log.
+    fn read_once(pkt: [u8; HID_PACKET_SIZE], n: usize) -> (Result<[u8; HID_PACKET_SIZE]>, usize) {
+        let mut log = PacketLog::new(true);
+        let deadline = Instant::now() + std::time::Duration::from_secs(1);
+        let res = hid_read(&ShortMeter { pkt, n }, deadline, &mut log);
+        (res, log.packets.len())
+    }
+
+    #[test]
+    fn hid_read_rejects_a_read_shorter_than_the_declared_size() {
+        let pkt = packet(Dir::Rx, b"hello world").data;
+        let (res, logged) = read_once(pkt, PKT_DATA_OFFSET + 5);
+
+        let msg = res.unwrap_err().to_string();
+        assert!(
+            msg.contains("got 9 bytes") && msg.contains("declares 11"),
+            "got: {msg}"
+        );
+        assert_eq!(logged, 1, "the short packet must still be logged");
+    }
+
+    #[test]
+    fn hid_read_rejects_a_read_that_stops_before_the_size_byte() {
+        let pkt = packet(Dir::Rx, &[ENQ]).data;
+        let (res, logged) = read_once(pkt, PKT_DATA_OFFSET - 1);
+
+        let msg = res.unwrap_err().to_string();
+        assert!(msg.contains("got 3 bytes"), "got: {msg}");
+        assert_eq!(logged, 1);
+    }
+
+    #[test]
+    fn hid_read_leaves_an_oversized_size_byte_to_the_assembler() {
+        let mut pkt = packet(Dir::Rx, &[STX]).data;
+        pkt[PKT_SIZE_OFFSET] = 200;
+        let (res, _) = read_once(pkt, HID_PACKET_SIZE);
+        let pkt = res.expect("a full-length read is not a short read");
+
+        let Some(Err(err)) = MessageAssembler::new().push(&pkt) else {
+            panic!("expected an error");
+        };
+        assert!(err.to_string().contains("Corrupt HID packet"), "got: {err}");
+    }
+
+    #[test]
+    fn hid_read_accepts_a_full_length_read() {
+        let pkt = packet(Dir::Rx, b"hello world").data;
+        let (res, _) = read_once(pkt, HID_PACKET_SIZE);
+
+        assert_eq!(res.unwrap(), pkt);
+    }
+
+    #[test]
+    fn hid_read_accepts_a_read_that_just_covers_the_declared_size() {
+        let pkt = packet(Dir::Rx, b"hello world").data;
+        let (res, _) = read_once(pkt, PKT_DATA_OFFSET + 11);
+
+        assert_eq!(res.unwrap(), pkt);
     }
 
     #[test]

@@ -259,12 +259,20 @@ The `V` value holds thresholds in the device's *own display units*:
 - **mmol/L meters (`U=1`):** the values are tenths of mmol/L.
   `V=06333` → low = 0.6 mmol/L, high = 33.3 mmol/L.
 
-`bgl-read` always reports `low_threshold` and `high_threshold` in mg/dL. For
-mmol/L meters it converts the values with the factor 18.01559.
+`bgl-read` reports `low_threshold` and `high_threshold` in the meter's own
+units, the same as the readings, and does not convert them. The
+`threshold_units` field says which: `"mg/dL"` or `"mmol/L"`. Both are always
+decimal numbers in JSON (`20.0`, not `20`).
 
-These values are the full measurable range of the device. The user cannot
-change them, and they are not alert thresholds. The meter flags readings
-outside the range with `>` or `<` in the marker field.
+If `V=` is missing or cannot be read, `bgl-read` falls back to the meter's
+published range in the units `U=` gives: `20.0`/`600.0` with `"mg/dL"`, or
+`0.6`/`33.3` with `"mmol/L"`. Only one field of a `V=` pair parsing counts as
+unreadable, so a real low is never paired with a guessed high. With no `U=`
+either, the mg/dL fallback applies.
+
+Despite their names, these values are not alert thresholds. They are the full
+measurable range of the device. The user cannot change them. The meter flags
+readings outside the range with `>` or `<` in the marker field.
 
 ---
 
