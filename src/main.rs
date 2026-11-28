@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use output::Format;
 use std::io::{self, IsTerminal};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -90,8 +90,7 @@ fn main() -> Result<()> {
 
     let api = hidapi::HidApi::new()?;
     let device = protocol::open_device(&api)?;
-    let capture = matches!(cli.format, Format::Bytes | Format::Binary);
-    let session = match protocol::fetch_all(&device, cli.progress, capture) {
+    let session = match protocol::fetch_all(&device, cli.progress) {
         Ok(session) => session,
         Err(e) => {
             // A failed session is exactly when a packet dump is most useful —
@@ -105,15 +104,19 @@ fn main() -> Result<()> {
                     raw_packets: e.packets,
                     ..Default::default()
                 };
-                // Dump in whichever capture format was asked for, so a
-                // `--format binary` failure still leaves a replayable file.
-                let dump = match cli.format {
-                    Format::Binary => Format::Binary,
-                    _ => Format::Bytes,
-                };
+                let (dump, target) = dump_target(cli.format, cli.output.as_deref());
                 // Do not let a dump failure hide the session error below.
-                if let Err(dump_err) = output::write(&partial, dump, cli.output.as_deref()) {
-                    eprintln!("warning: could not write the packet dump: {dump_err}");
+                match output::write(&partial, dump, target.as_deref()) {
+                    // The dump can land at a path the user never typed, so
+                    // say where it went.
+                    Ok(()) => {
+                        if let Some(p) = &target {
+                            eprintln!("Packet dump written to {}", p.display());
+                        }
+                    }
+                    Err(dump_err) => {
+                        eprintln!("warning: could not write the packet dump: {dump_err}");
+                    }
                 }
             }
             return Err(e.error);
@@ -121,4 +124,91 @@ fn main() -> Result<()> {
     };
 
     output::write(&session, cli.format, cli.output.as_deref())
+}
+
+/// Where a failed read's packet dump goes, and in which format.
+///
+/// A capture format dumps as itself, into the file that was named for it, so
+/// a `--format binary` failure still leaves a replayable file. Any other
+/// format would get a hex dump written into a file named for something else —
+/// and `output::write` truncates — so that dump goes beside the file instead.
+fn dump_target(format: Format, output: Option<&Path>) -> (Format, Option<PathBuf>) {
+    match format {
+        Format::Bytes | Format::Binary => (format, output.map(Path::to_path_buf)),
+        _ => (Format::Bytes, output.map(dump_path)),
+    }
+}
+
+/// `readings.csv` -> `readings.csv.dump`: append, never replace the extension,
+/// so the name the dump came from stays readable and two `--output` paths
+/// cannot collide on one dump. An earlier dump at that path is replaced.
+fn dump_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".dump");
+    name.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The data-loss guard: a hex dump must never land on the file the user
+    /// named for another format, because `output::write` truncates it.
+    #[test]
+    fn a_hex_dump_never_lands_on_the_output_file() {
+        for format in [Format::Json, Format::Csv, Format::Records] {
+            let (dump, target) = dump_target(format, Some(Path::new("readings.csv")));
+            assert!(matches!(dump, Format::Bytes));
+            assert_eq!(target, Some(PathBuf::from("readings.csv.dump")));
+        }
+    }
+
+    #[test]
+    fn a_capture_format_dumps_into_the_file_named_for_it() {
+        let (dump, target) = dump_target(Format::Bytes, Some(Path::new("session.hex")));
+        assert!(matches!(dump, Format::Bytes));
+        assert_eq!(target, Some(PathBuf::from("session.hex")));
+
+        let (dump, target) = dump_target(Format::Binary, Some(Path::new("capture.bin")));
+        assert!(matches!(dump, Format::Binary));
+        assert_eq!(target, Some(PathBuf::from("capture.bin")));
+    }
+
+    /// No `--output` means the dump goes to stdout, and that there is no path
+    /// for the caller to print.
+    #[test]
+    fn without_an_output_file_every_format_dumps_to_stdout() {
+        for format in [
+            Format::Json,
+            Format::Csv,
+            Format::Records,
+            Format::Bytes,
+            Format::Binary,
+        ] {
+            assert_eq!(dump_target(format, None).1, None);
+        }
+    }
+
+    #[test]
+    fn dump_path_appends_rather_than_replacing_the_extension() {
+        assert_eq!(
+            dump_path(Path::new("out/readings.csv")),
+            PathBuf::from("out/readings.csv.dump")
+        );
+    }
+
+    /// Why `OsString` and not `format!("{}.dump", path.display())`: `display()`
+    /// replaces bytes that are not UTF-8, which would write the dump to a
+    /// different file than the one the user named.
+    #[cfg(unix)]
+    #[test]
+    fn dump_path_keeps_non_utf8_bytes() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let raw = OsStr::from_bytes(b"read\xffings.csv");
+        assert_eq!(
+            dump_path(Path::new(raw)).as_os_str().as_bytes(),
+            b"read\xffings.csv.dump"
+        );
+    }
 }

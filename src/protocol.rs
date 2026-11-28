@@ -237,28 +237,6 @@ fn build_write_packet(data: &[u8]) -> [u8; WRITE_PACKET_SIZE] {
     pkt
 }
 
-/// Keeps HID packets for `--format bytes` and `--format binary`. When `capture` is false,
-/// `push` is a no-op and no allocations happen beyond the empty Vec itself.
-struct PacketLog {
-    packets: Vec<Packet>,
-    capture: bool,
-}
-
-impl PacketLog {
-    fn new(capture: bool) -> Self {
-        Self {
-            packets: Vec::new(),
-            capture,
-        }
-    }
-
-    fn push(&mut self, packet: Packet) {
-        if self.capture {
-            self.packets.push(packet);
-        }
-    }
-}
-
 /// The two device calls the session loop needs. A test can replace the real
 /// meter with a scripted one, because the loop only sees this trait.
 pub(crate) trait Transport {
@@ -277,7 +255,7 @@ impl Transport for HidDevice {
     }
 }
 
-fn hid_write(device: &impl Transport, data: &[u8], log: &mut PacketLog) -> Result<()> {
+fn hid_write(device: &impl Transport, data: &[u8], log: &mut Vec<Packet>) -> Result<()> {
     let pkt = build_write_packet(data);
     // Log without the report-ID byte
     let tx_data: [u8; HID_PACKET_SIZE] =
@@ -294,7 +272,7 @@ fn hid_write(device: &impl Transport, data: &[u8], log: &mut PacketLog) -> Resul
 fn hid_read(
     device: &impl Transport,
     deadline: Instant,
-    log: &mut PacketLog,
+    log: &mut Vec<Packet>,
 ) -> Result<[u8; HID_PACKET_SIZE]> {
     let remaining = deadline
         .saturating_duration_since(Instant::now())
@@ -353,7 +331,7 @@ struct Message {
 fn receive_message(
     device: &impl Transport,
     timeout: Duration,
-    log: &mut PacketLog,
+    log: &mut Vec<Packet>,
 ) -> Result<Message> {
     let deadline = Instant::now() + timeout;
     let mut asm = MessageAssembler::new();
@@ -893,7 +871,7 @@ fn control_skip_message(n: usize) -> String {
 /// Send one command, receive one complete message, retry with NAK on transient errors.
 fn get_one_record(
     device: &impl Transport,
-    log: &mut PacketLog,
+    log: &mut Vec<Packet>,
 ) -> Result<(Record, String, Option<u8>)> {
     // Counts every pass that does not return a record.
     let mut retries = 0u32;
@@ -955,7 +933,9 @@ fn get_one_record(
 }
 
 /// A failed session, still carrying every HID packet captured before the
-/// error so callers can dump them for debugging (`--format bytes`).
+/// error so callers can dump them for debugging. A live read is captured
+/// whatever format was asked for: the packets are the only copy of a read
+/// that died partway, and re-reading the meter is the only other way back.
 #[derive(Debug)]
 pub struct FetchError {
     pub error: anyhow::Error,
@@ -970,7 +950,7 @@ pub struct FetchError {
 /// also notes the Contour Next One must NOT be sent EOT. Without this the
 /// meter sits silent until our receive timeout, adding ~10s to every
 /// session. Best-effort: all readings are already captured at this point.
-fn close_session(device: &impl Transport, log: &mut PacketLog) {
+fn close_session(device: &impl Transport, log: &mut Vec<Packet>) {
     if hid_write(device, &[ACK], log).is_err() {
         return;
     }
@@ -982,24 +962,21 @@ fn close_session(device: &impl Transport, log: &mut PacketLog) {
 
 /// Open a session and read all records until the L terminator or EOT.
 ///
-/// On failure the captured packet log survives inside [`FetchError`] —
-/// failure modes are exactly when a `--format bytes` dump is most useful.
-pub fn fetch_all(
-    device: &impl Transport,
-    progress: bool,
-    capture_packets: bool,
-) -> Result<Session, FetchError> {
-    let mut log = PacketLog::new(capture_packets);
+/// On failure the captured packet log survives inside [`FetchError`] so the
+/// caller can dump it — a read that died partway is exactly when those
+/// packets are worth keeping, whichever format was asked for.
+pub fn fetch_all(device: &impl Transport, progress: bool) -> Result<Session, FetchError> {
+    let mut log = Vec::new();
     fetch_all_inner(device, progress, &mut log).map_err(|error| FetchError {
         error,
-        packets: log.packets,
+        packets: log,
     })
 }
 
 fn fetch_all_inner(
     device: &impl Transport,
     progress: bool,
-    packets: &mut PacketLog,
+    packets: &mut Vec<Packet>,
 ) -> Result<Session> {
     let mut builder = SessionBuilder::new(progress);
 
@@ -1026,7 +1003,7 @@ fn fetch_all_inner(
     builder.finish(
         "Meter sent no records. It usually needs a short rest between \
          sessions — wait ~10 seconds and retry.",
-        &mut packets.packets,
+        packets,
     )
 }
 
@@ -2094,7 +2071,7 @@ mod tests {
         script.extend(script_of(vec![packet(Dir::Rx, &[EOT])]));
 
         let meter = ScriptedMeter::new(script);
-        let session = fetch_all(&meter, false, false).unwrap();
+        let session = fetch_all(&meter, false).unwrap();
         assert_eq!(session.raw_records, lines);
     }
 
@@ -2224,10 +2201,10 @@ mod tests {
     /// Read one packet through `hid_read`, capturing, and return the result
     /// with the capture log.
     fn read_once(pkt: [u8; HID_PACKET_SIZE], n: usize) -> (Result<[u8; HID_PACKET_SIZE]>, usize) {
-        let mut log = PacketLog::new(true);
+        let mut log = Vec::new();
         let deadline = Instant::now() + std::time::Duration::from_secs(1);
         let res = hid_read(&ShortMeter { pkt, n }, deadline, &mut log);
-        (res, log.packets.len())
+        (res, log.len())
     }
 
     #[test]
@@ -2285,7 +2262,7 @@ mod tests {
     #[test]
     fn live_session_reads_every_record_and_closes_with_nak() {
         let meter = ScriptedMeter::new(full_script());
-        let session = fetch_all(&meter, false, false).unwrap();
+        let session = fetch_all(&meter, false).unwrap();
         let (_, readings) = parse_records_from_text(FIXTURE);
 
         assert_eq!(session.raw_records, fixture_lines());
@@ -2298,7 +2275,7 @@ mod tests {
     #[test]
     fn live_and_replay_agree() {
         let meter = ScriptedMeter::new(full_script());
-        let live = fetch_all(&meter, false, true).unwrap();
+        let live = fetch_all(&meter, false).unwrap();
         let replay = session_from_packets(live.raw_packets.clone()).unwrap();
 
         assert_eq!(live.raw_records, replay.raw_records);
@@ -2323,7 +2300,7 @@ mod tests {
         script.extend(script_of(vec![packet(Dir::Rx, &[EOT])]));
 
         let meter = ScriptedMeter::new(script);
-        let session = fetch_all(&meter, false, false).unwrap();
+        let session = fetch_all(&meter, false).unwrap();
 
         assert_eq!(session.raw_records, lines);
         assert!(meter.sent()[..meter.sent().len() - 1].contains(&NAK));
@@ -2340,7 +2317,7 @@ mod tests {
         script.insert(before_third, None);
 
         let meter = ScriptedMeter::new(script);
-        let session = fetch_all(&meter, false, false).unwrap();
+        let session = fetch_all(&meter, false).unwrap();
 
         assert_eq!(session.raw_records, fixture_lines());
         assert!(meter.sent()[..meter.sent().len() - 1].contains(&NAK));
@@ -2350,7 +2327,7 @@ mod tests {
     fn live_session_gives_up_when_the_meter_only_sends_enq() {
         let enq = packet(Dir::Rx, &[ENQ]).data;
         let meter = ScriptedMeter::new(vec![Some(enq); 3 * MAX_RETRIES as usize]);
-        let err = fetch_all(&meter, false, true).unwrap_err();
+        let err = fetch_all(&meter, false).unwrap_err();
 
         assert_eq!(meter.sent().len(), MAX_RETRIES as usize);
         assert!(!err.packets.is_empty(), "captured packets must survive");
@@ -2362,7 +2339,7 @@ mod tests {
         script.extend(script_of(framed(0, fixture_lines()[0])));
         script.extend(script_of(vec![packet(Dir::Rx, &[EOT])]));
 
-        let err = fetch_all(&ScriptedMeter::new(script), false, false).unwrap_err();
+        let err = fetch_all(&ScriptedMeter::new(script), false).unwrap_err();
         assert!(
             err.error.to_string().contains("incomplete"),
             "got: {}",
@@ -2376,7 +2353,7 @@ mod tests {
         let mut script = vec![None];
         script.extend(vec![Some(enq); 3 * MAX_RETRIES as usize]);
         let meter = ScriptedMeter::new(script);
-        let err = fetch_all(&meter, false, false).unwrap_err();
+        let err = fetch_all(&meter, false).unwrap_err();
 
         let text = err.error.to_string();
         assert_eq!(meter.sent().len(), MAX_RETRIES as usize);
